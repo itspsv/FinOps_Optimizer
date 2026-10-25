@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Benchmark outputs
+benchmark/results/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/

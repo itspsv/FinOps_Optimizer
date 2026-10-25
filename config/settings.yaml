@@ -1,0 +1,27 @@
+# Non-secret defaults. Secrets (API keys) live in .env.
+# Any value here can be overridden by an env var, e.g. FINOPS_PREMIUM__MODEL.
+
+log_level: INFO
+
+# Homebrew Postgres over the local socket; no password needed.
+database_url: postgresql:///finops
+
+premium:
+  name: groq
+  base_url: https://api.groq.com/openai/v1
+  # Groq free-tier model; Llama 3.3 70B is enterprise-only as of Oct 2026.
+  model: openai/gpt-oss-120b
+  timeout_s: 60
+
+cache:
+  enabled: true
+  # Cosine similarity needed for a semantic hit. Starting point only;
+  # the benchmark step calibrates it on labeled paraphrase pairs.
+  similarity_threshold: 0.92
+  ttl_s: 86400
+  # Requests above this temperature want varied answers, so we don't cache them.
+  max_temperature: 1.0
+  # ONNX model via fastembed: ~70 MB on disk, no PyTorch needed.
+  embedding_model: BAAI/bge-small-en-v1.5
+  embedding_dim: 384
+  model_cache_dir: ~/.cache/finops/fastembed
