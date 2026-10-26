@@ -2,8 +2,10 @@ import pytest
 
 from finops.core.config import RoutingSettings
 from finops.router import Tier, classify
+from finops.router.classifier import has_supplied_material
 
-SETTINGS = RoutingSettings()
+SETTINGS = RoutingSettings(local_policy="permissive")  # v1 rules
+V2 = RoutingSettings(local_policy="grounded")
 
 
 def _ask(text: str, **params) -> dict:
@@ -88,3 +90,55 @@ def test_client_override_wins():
     code = _ask("Write a Python function.")
     assert classify(code, SETTINGS, override="local").tier is Tier.LOCAL
     assert classify(_ask("hi"), SETTINGS, override="premium").reason == "client_override"
+
+
+# --- v2 "grounded" policy -------------------------------------------------------------
+
+PASSAGE = (
+    "Virgin Australia commenced services on 31 August 2000 as Virgin Blue, with two "
+    "aircraft on a single route. It suddenly found itself a major airline in Australia's "
+    "domestic market after the collapse of Ansett Australia in September 2001."
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Classify the sentiment as positive or negative: I love this product.",
+        "Translate 'good morning' into Spanish.",
+        f"When did Virgin Australia start operating?\n\n{PASSAGE}",
+        f"Extract the year the airline was founded.\n\n{PASSAGE}",
+        "What is the capital of Japan? Answer in one word.",
+    ],
+)
+def test_v2_keeps_grounded_and_transform_tasks_local(text: str):
+    decision = classify(_ask(text), V2)
+    assert decision.tier is Tier.LOCAL, decision
+
+
+@pytest.mark.parametrize(
+    ("text", "signal"),
+    [
+        ("Is a PhD in chemistry worth pursuing?", "open_knowledge"),
+        ("What exactly is the West Bank?", "open_knowledge"),
+        ("Brainstorm ten names for a coffee shop.", "open_knowledge"),
+        (
+            "Janet's ducks lay 16 eggs per day. She eats three and sells the rest for $2 "
+            "each. How much does she make every day?",
+            "math_word_problem",
+        ),
+    ],
+)
+def test_v2_sends_open_questions_and_word_problems_premium(text: str, signal: str):
+    decision = classify(_ask(text), V2)
+    assert decision.tier is Tier.PREMIUM
+    assert signal in decision.signals
+
+
+def test_short_trailer_after_blank_line_is_not_a_passage():
+    assert not has_supplied_material("What is 2 apples plus 3?\n\nAnswer with a number.")
+    assert has_supplied_material(f"Question?\n\n{PASSAGE}")
+
+
+def test_v1_policy_is_unchanged_by_v2_rules():
+    assert classify(_ask("Is a PhD in chemistry worth pursuing?"), SETTINGS).tier is Tier.LOCAL

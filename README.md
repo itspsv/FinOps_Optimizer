@@ -114,6 +114,19 @@ classify ─┬─ local ──▶ Ollama ──▶ answer ok? ── yes ──
 4. **Circuit breaker**: after 3 local failures in a row, local is skipped for 30 s, so a
    stopped Ollama doesn't add a failed call to every request.
 
+### Routing policies
+
+| Policy | Local gets | Premium gets |
+|---|---|---|
+| `permissive` (v1) | anything without complexity signals | code, math expressions, heavy reasoning |
+| `grounded` (v2, default) | tasks done from the given text: classify, summarize, extract, rewrite, questions with a supplied passage | also open knowledge questions and math word problems |
+
+Why v2: benchmark run `full-1` (v1) kept 89% of requests off premium and saved 60%, but an
+LLM judge rated only 54% of local answers acceptable. The 3B model handled extraction and
+summaries well and made up facts on open questions. It also sent 25 of 30 GSM8K word problems
+local, because they contain no math keywords. Set `routing.local_policy` to choose; a
+stronger local model (e.g. 8B on a 16 GB machine) makes `permissive` more viable.
+
 Local answers are cached like premium ones. Streamed requests that go local are answered in
 full, checked, then replayed as a stream.
 
@@ -168,7 +181,13 @@ make dev                        # in another terminal
 make bench-run RUN=full-1       # replay (~30 min on an M1; resumable)
 make bench-eval RUN=full-1      # LLM judge + GSM8K exact match
 make bench-report RUN=full-1    # -> benchmark/results/full-1/report.md
+make bench-compare RUNS="full-1 full-2"   # side-by-side table
 ```
+
+Groq's free tier caps gpt-oss-120b at **200K tokens/day** (and 8K/minute). One full replay
+plus judging can exceed it. The replay and evaluation both resume where they stopped, and the
+evaluator reuses reference answers from earlier runs. To split a replay over two days, keep
+cached answers alive between sessions with `FINOPS_CACHE__TTL_S=259200 make dev`.
 
 What the benchmark has already changed:
 

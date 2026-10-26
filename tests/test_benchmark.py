@@ -174,3 +174,50 @@ def test_render_report_smoke():
     assert "# Benchmark report: run1" in text
     assert "80x faster" in text
     assert "Resume-ready lines" in text
+
+
+def test_token_budget_waits_for_the_window_to_clear():
+    now, slept = [0.0], []
+
+    def sleep(s):
+        slept.append(s)
+        now[0] += s
+
+    budget = evaluate.TokenBudget(8000, clock=lambda: now[0], sleep=sleep)
+    budget.reserve(5000)
+    now[0] = 10
+    budget.reserve(2000)  # 7,000 in window: fits
+    assert slept == []
+    budget.correct_last(2500)
+    budget.reserve(1000)  # 8,500 would exceed: wait until the first entry expires
+    assert slept and now[0] >= 60
+
+
+def test_collect_references_from_earlier_runs(tmp_path):
+    run = tmp_path / "run-a"
+    run.mkdir()
+    (run / "eval.jsonl").write_text(
+        '{"id": "x", "check": "local_vs_reference", "verdict": "pass", "reason": "", '
+        '"reference": "ref x"}\n'
+        '{"id": "y", "check": "semantic_hit", "verdict": "pass", "reason": "", '
+        '"reference": null}\n'
+    )
+    assert evaluate.collect_references(tmp_path) == {"x": "ref x"}
+
+
+def test_compare_render():
+    from benchmark import compare
+    from finops.ledger.store import build_summary as ledger_summary
+
+    def summary(local_requests):
+        ledger = ledger_summary({"local": {"requests": local_requests, "p50_ms": 9000}}, 0)
+        return {
+            "ledger": ledger,
+            "shares": {"cache": 0.0, "local": 1.0, "premium": 0.0},
+            "routing": {"accuracy": 0.5},
+            "evaluation": {"local_quality": {"n": 4, "pass_rate": 0.75}},
+        }
+
+    text = compare.render({"v1": summary(3), "v2": summary(1)})
+    assert "| Metric | v1 | v2 |" in text
+    assert "75.0% (n=4)" in text

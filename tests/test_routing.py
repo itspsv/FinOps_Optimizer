@@ -77,7 +77,7 @@ def test_complex_prompt_goes_to_premium(routed_client: TestClient, upstream: res
     response = _ask(routed_client, COMPLEX)
 
     assert response.headers["x-finops-route"] == "premium"
-    assert response.headers["x-finops-route-reason"] == "code"
+    assert "code" in response.headers["x-finops-route-reason"].split(",")
     assert local.call_count == 0 and premium.call_count == 1
 
 

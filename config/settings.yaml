@@ -24,7 +24,12 @@ local:
 routing:
   enabled: true
   # Part of every cache key; bump it when routing rules change so old answers expire.
-  policy_version: v1
+  policy_version: v2
+  # grounded (v2): local only for tasks it can do from the given text (classify,
+  # summarize, extract, rewrite, questions with a passage); open knowledge questions
+  # and math word problems go premium. permissive (v1): anything not flagged complex
+  # goes local. Benchmark run full-1 (v1) judged only 54% of local answers acceptable.
+  local_policy: grounded
   # Requests above these sizes always go to premium (local is slow on long text).
   local_max_prompt_tokens: 1500
   local_max_completion_tokens: 512

@@ -5,6 +5,14 @@ decision comes with readable reasons. Two layers:
 
 1. Hard limits: things the local model can't do well (tools, images, long text).
 2. A complexity score from keyword signals; at or above the threshold -> premium.
+
+Policies (`routing.local_policy`):
+
+- "permissive" (v1): anything without complexity signals goes local.
+- "grounded" (v2): local only for tasks it can do from the text it is given
+  (classify, summarize, extract, rewrite, or questions with a supplied passage).
+  Open world-knowledge questions and math word problems go to premium. The v1
+  benchmark found a 3B model answers only ~50% of open questions acceptably.
 """
 
 import re
@@ -131,6 +139,16 @@ _SIGNALS: list[tuple[str, int, re.Pattern[str]]] = [
     ),
 ]
 
+# v2: a math word problem has several numbers and asks about a quantity, often with
+# no math keywords at all ("Janet's ducks lay 16 eggs... how much does she make?").
+_NUMBER = re.compile(r"\b\d+(?:[.,]\d+)?\b")
+_QUANTITY_QUESTION = _words(
+    "how many", "how much", "how long", "how far", "how old", "how often", "total",
+    "altogether", "in all", "left over", "remaining", "per", "each", "percent(?:age)?",
+    "average", "profit", "earns?", "costs?",
+)  # fmt: skip
+_MIN_PASSAGE_CHARS = 150  # text after a blank line this long counts as supplied material
+
 _MAX_HITS_PER_SIGNAL = 2
 _LONG_PROMPT_TOKENS = 300
 _LONG_CONVERSATION_TURNS = 6
@@ -166,12 +184,25 @@ def classify(
     if len(messages) > _LONG_CONVERSATION_TURNS:
         score += 1
         signals.append("long_conversation")
+    if settings.local_policy == "grounded":
+        if len(_NUMBER.findall(text)) >= 2 and _QUANTITY_QUESTION.search(text):
+            score += 2
+            signals.append("math_word_problem")
+        if "simple_task" not in signals and not has_supplied_material(text):
+            score += 2
+            signals.append("open_knowledge")
 
     tier = Tier.PREMIUM if score >= settings.complexity_threshold else Tier.LOCAL
     reason = ",".join(s for s in signals if s != "simple_task") or "simple"
     if tier is Tier.LOCAL and "simple_task" in signals:
         reason = "simple_task"
     return RouteDecision(tier, reason, score, signals, tokens)
+
+
+def has_supplied_material(text: str) -> bool:
+    """True if the prompt carries its own passage to work from (after a blank line)."""
+    parts = re.split(r"\n\s*\n", text.strip(), maxsplit=1)
+    return len(parts) == 2 and len(parts[1].strip()) >= _MIN_PASSAGE_CHARS
 
 
 def estimate_tokens(text: str) -> int:

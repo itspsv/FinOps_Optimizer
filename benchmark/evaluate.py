@@ -20,12 +20,14 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from benchmark.replay import Pacer, ReplayResult, load_results, run_dir
+from benchmark.replay import RESULTS_DIR, ReplayResult, load_results, run_dir
 from benchmark.workload import WORKLOAD_FILE, WorkItem, load
 from finops.core.config import get_settings
 from finops.providers import OpenAICompatibleProvider, Provider, ProviderError
 
-MAX_CHARS = 4000  # per answer in judge prompts, to bound tokens
+MAX_CHARS = 3000  # per answer in judge prompts, to bound tokens
+REFERENCE_MAX_TOKENS = 700
+JUDGE_MAX_TOKENS = 400
 
 JUDGE_SYSTEM = (
     "You are a strict, fair evaluator of AI assistant answers. "
@@ -105,35 +107,74 @@ def parse_verdict(text: str) -> tuple[str, str]:
     return "error", f"unparseable judge output: {text[:200]}"
 
 
+class TokenBudget:
+    """Keeps tokens sent in any 60 s window under a budget (Groq free tier: 8,000 TPM)."""
+
+    def __init__(self, tokens_per_minute: int, clock=time.monotonic, sleep=time.sleep):
+        self._budget = tokens_per_minute
+        self._clock, self._sleep = clock, sleep
+        self._spent: list[tuple[float, int]] = []
+
+    def _window_total(self) -> int:
+        cutoff = self._clock() - 60
+        self._spent = [(t, n) for t, n in self._spent if t > cutoff]
+        return sum(n for _, n in self._spent)
+
+    def reserve(self, tokens: int) -> None:
+        tokens = min(tokens, self._budget)
+        while self._spent and self._window_total() + tokens > self._budget:
+            self._sleep(max(0.5, self._spent[0][0] + 60 - self._clock()))
+        self._spent.append((self._clock(), tokens))
+
+    def correct_last(self, actual: int) -> None:
+        """Replace the last reservation with the real usage reported by the API."""
+        if self._spent and actual:
+            self._spent[-1] = (self._spent[-1][0], actual)
+
+
 class GroqClient:
-    """Direct calls to the premium provider with pacing and 429 retries."""
+    """Direct calls to the premium provider, paced by tokens per minute, with retries."""
 
-    def __init__(self, provider: Provider, pacer: Pacer):
+    def __init__(self, provider: Provider, budget: TokenBudget, sleep=time.sleep):
         self._provider = provider
-        self._pacer = pacer
+        self._budget = budget
+        self._sleep = sleep
 
-    async def ask(self, messages: list[dict], json_mode: bool = False) -> str:
-        payload: dict = {"messages": messages, "temperature": 0}
+    async def ask(self, messages: list[dict], max_tokens: int, json_mode: bool = False) -> str:
+        payload: dict = {
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": max_tokens,
+            # gpt-oss "thinks" before answering; low effort keeps token use (and TPM) down.
+            "reasoning_effort": "low",
+        }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        for attempt in range(1, 5):
-            self._pacer.wait()
+        estimate = sum(len(m["content"]) for m in messages) // 4 + max_tokens
+        for attempt in range(1, 7):
+            self._budget.reserve(estimate)
             try:
                 response = await self._provider.chat(payload)
-                return response["choices"][0]["message"].get("content") or ""
             except ProviderError as exc:
-                if exc.status_code == 400 and json_mode:  # model without JSON mode
-                    payload.pop("response_format", None)
+                if exc.status_code == 400 and (
+                    "response_format" in payload or "reasoning_effort" in payload
+                ):
+                    payload.pop("reasoning_effort", None) or payload.pop("response_format", None)
                     continue
-                if exc.status_code not in (429, 500, 502, 503, 504) or attempt == 4:
+                if exc.status_code not in (429, 500, 502, 503, 504) or attempt == 6:
                     raise
-                print(f"    Groq HTTP {exc.status_code}, retrying in {15 * attempt}s")
-                time.sleep(15 * attempt)
+                wait = 20 * attempt
+                print(f"    Groq HTTP {exc.status_code}, retrying in {wait}s", flush=True)
+                self._sleep(wait)
+                continue
+            self._budget.correct_last((response.get("usage") or {}).get("total_tokens", 0))
+            return response["choices"][0]["message"].get("content") or ""
         raise RuntimeError("unreachable")
 
     async def judge(self, prompt: str) -> tuple[str, str]:
         text = await self.ask(
             [{"role": "system", "content": JUDGE_SYSTEM}, {"role": "user", "content": prompt}],
+            max_tokens=JUDGE_MAX_TOKENS,
             json_mode=True,
         )
         return parse_verdict(text)
@@ -146,7 +187,11 @@ async def evaluate(
     out_file: Path,
     local_sample: int,
     seed: int = 7,
+    known_references: dict[str, str] | None = None,
 ) -> list[Judgement]:
+    """`known_references`: reference answers from earlier runs, by item id. The workload is
+    the same across runs, so reusing them saves premium tokens (Groq's daily cap)."""
+    known_references = known_references or {}
     done = {}
     if out_file.exists():
         for line in out_file.read_text().splitlines():
@@ -159,7 +204,7 @@ async def evaluate(
     semantic = sorted(r.id for r in results.values() if r.cache == "hit_semantic")
     tasks = [(i, "local_vs_reference") for i in local] + [(i, "semantic_hit") for i in semantic]
     todo = [t for t in tasks if t not in done]
-    print(f"Judging {len(todo)} answers ({len(tasks) - len(todo)} already done)")
+    print(f"Judging {len(todo)} answers ({len(tasks) - len(todo)} already done)", flush=True)
 
     with out_file.open("a") as f:
         for n, (item_id, check) in enumerate(todo, 1):
@@ -168,7 +213,9 @@ async def evaluate(
             reference = None
             try:
                 if check == "local_vs_reference":
-                    reference = await groq.ask([{"role": "user", "content": item.prompt}])
+                    reference = known_references.get(item_id) or await groq.ask(
+                        [{"role": "user", "content": item.prompt}], REFERENCE_MAX_TOKENS
+                    )
                     prompt = LOCAL_TEMPLATE.format(
                         question=item.prompt[:MAX_CHARS],
                         reference=reference[:MAX_CHARS],
@@ -186,8 +233,19 @@ async def evaluate(
             f.write(json.dumps(asdict(judgement), ensure_ascii=False) + "\n")
             f.flush()
             if n % 10 == 0 or n == len(todo):
-                print(f"  {n}/{len(todo)} judged")
+                print(f"  {n}/{len(todo)} judged", flush=True)
     return [done[t] for t in tasks if t in done]
+
+
+def collect_references(results_dir: Path) -> dict[str, str]:
+    """Reference answers already fetched by any earlier run's evaluation."""
+    refs: dict[str, str] = {}
+    for path in sorted(results_dir.glob("*/eval.jsonl")):
+        for line in path.read_text().splitlines():
+            row = json.loads(line)
+            if row.get("reference"):
+                refs.setdefault(row["id"], row["reference"])
+    return refs
 
 
 def summarize(judgements: list[Judgement], items: dict[str, WorkItem]) -> dict:
@@ -209,7 +267,7 @@ def summarize(judgements: list[Judgement], items: dict[str, WorkItem]) -> dict:
     }
 
 
-async def amain(run_id: str, local_sample: int, judge_model: str | None, max_rpm: float) -> None:
+async def amain(run_id: str, local_sample: int, judge_model: str | None, tpm: int) -> None:
     out = run_dir(run_id)
     results = load_results(out / "responses.jsonl")
     if not results:
@@ -221,8 +279,15 @@ async def amain(run_id: str, local_sample: int, judge_model: str | None, max_rpm
         settings = settings.model_copy(update={"model": judge_model})
     provider = OpenAICompatibleProvider(settings)
     try:
+        refs = collect_references(RESULTS_DIR)
+        print(f"Reusing {len(refs)} reference answers from earlier runs", flush=True)
         judgements = await evaluate(
-            items, results, GroqClient(provider, Pacer(max_rpm)), out / "eval.jsonl", local_sample
+            items,
+            results,
+            GroqClient(provider, TokenBudget(tpm)),
+            out / "eval.jsonl",
+            local_sample,
+            known_references=refs,
         )
     finally:
         await provider.aclose()
@@ -242,9 +307,9 @@ def main() -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--local-sample", type=int, default=60)
     parser.add_argument("--judge-model", help="defaults to the premium model")
-    parser.add_argument("--max-rpm", type=float, default=25)
+    parser.add_argument("--tpm", type=int, default=7000, help="Groq tokens/minute budget")
     args = parser.parse_args()
-    asyncio.run(amain(args.run_id, args.local_sample, args.judge_model, args.max_rpm))
+    asyncio.run(amain(args.run_id, args.local_sample, args.judge_model, args.tpm))
 
 
 if __name__ == "__main__":
