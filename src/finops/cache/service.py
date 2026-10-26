@@ -30,7 +30,7 @@ class CacheStatus(StrEnum):
 class CacheLookup:
     status: CacheStatus
     namespace: str
-    upstream_model: str
+    model_scope: str  # what answers depend on: a model name or routing policy
     match: CacheMatch | None = None
     keys: CacheKeys | None = None
     embedding: list[float] | None = None
@@ -49,9 +49,9 @@ class SemanticCache:
         self._settings = settings
 
     async def lookup(
-        self, payload: dict[str, Any], upstream_model: str, namespace: str, bypass: bool = False
+        self, payload: dict[str, Any], model_scope: str, namespace: str, bypass: bool = False
     ) -> CacheLookup:
-        result = CacheLookup(CacheStatus.MISS, namespace, upstream_model)
+        result = CacheLookup(CacheStatus.MISS, namespace, model_scope)
         if bypass:
             result.status = CacheStatus.BYPASS
             return result
@@ -60,7 +60,7 @@ class SemanticCache:
             return result
 
         try:
-            result.keys = build_keys(payload, upstream_model)
+            result.keys = build_keys(payload, model_scope)
             if match := await self._store.find_exact(namespace, result.keys.request_hash):
                 result.status, result.match = CacheStatus.HIT_EXACT, match
                 return result
@@ -93,7 +93,7 @@ class SemanticCache:
                     keys=lookup.keys,
                     embedding=lookup.embedding,
                     embedding_model=self._embedder.model_name,
-                    upstream_model=lookup.upstream_model,
+                    upstream_model=response.get("model") or lookup.model_scope,
                     response=response,
                     ttl_s=self._settings.ttl_s,
                 )

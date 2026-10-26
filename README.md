@@ -7,8 +7,8 @@ A local-first proxy that sits between applications and paid LLM APIs and cuts co
 
 Every decision is recorded in a cost ledger and shown in a Streamlit dashboard.
 
-> **Status:** Step 2 of 5. OpenAI-compatible proxy to the premium tier (Groq), with a
-> two-tier exact + semantic cache on pgvector.
+> **Status:** Step 3 of 5. OpenAI-compatible proxy with a two-tier exact + semantic cache on
+> pgvector, and a LangGraph router that sends simple requests to a local Ollama model.
 
 ## Architecture (target)
 
@@ -30,6 +30,10 @@ App ──▶ FastAPI proxy ──▶ 1. Cache hit?  ──yes──▶ cached a
 Requirements: [uv](https://docs.astral.sh/uv/), Homebrew PostgreSQL 18 with pgvector, Ollama.
 
 ```bash
+# In its own terminal: one model in memory at a time, kept warm between requests
+OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_KEEP_ALIVE=10m ollama serve
+ollama pull llama3.2:3b      # ~2 GB local model
+
 make install                 # creates .venv with Python 3.12 and installs deps
 cp .env.example .env         # then put your Groq API key in .env
 createdb finops              # once; needs `brew install pgvector`
@@ -56,7 +60,10 @@ Every response carries headers that say what the proxy did:
 | Header | Meaning |
 |---|---|
 | `x-finops-request-id` | Unique ID for tracing this request |
-| `x-finops-route` | `cache` or `premium`; later also `local` |
+| `x-finops-route` | `cache`, `local` or `premium`: what actually answered |
+| `x-finops-route-reason` | Why the router chose that tier, e.g. `simple_task`, `code`, `tools` |
+| `x-finops-complexity` | The router's complexity score |
+| `x-finops-escalated` | Present when a local attempt failed, e.g. `local_truncated` |
 | `x-finops-cache` | `hit_exact`, `hit_semantic`, `miss`, `skip`, `bypass` or `error` |
 | `x-finops-cache-similarity` | Similarity to the closest cached prompt, also sent on misses |
 | `x-finops-provider` | Upstream that served the request |
@@ -68,6 +75,7 @@ Request headers the proxy understands:
 |---|---|
 | `x-finops-namespace` | Cache partition, e.g. one per tenant. Defaults to `default`. |
 | `x-finops-cache-control: bypass` | Skip the cache for this request |
+| `x-finops-route-override` | Force `local` or `premium`, e.g. for benchmarking |
 
 ## How the cache decides
 
@@ -80,7 +88,33 @@ Request headers the proxy understands:
 5. **Store** only complete answers (`finish_reason: stop`), after the response is sent.
 
 The cache fails open: if Postgres or the embedder is down, requests still go to the API.
-Streamed misses are not cached yet; streamed requests can still be served from the cache.
+Streamed premium answers are not cached yet; streamed requests can still be served from the cache.
+
+## How the router decides
+
+Requests the cache can't answer go through a LangGraph workflow
+([engine.py](src/finops/router/engine.py)):
+
+```
+classify ─┬─ local ──▶ Ollama ──▶ answer ok? ── yes ──▶ done
+          │                          │ no / Ollama down
+          │                          ▼
+          └─ premium ──────────▶ Groq ──▶ done
+```
+
+1. **Hard limits → premium**: tools, images, JSON schemas, prompts over ~1,500 tokens or
+   requested answers over 512 tokens. The 3B model on an 8 GB M1 writes ~22 tokens/s, so long
+   jobs would be slow locally.
+2. **Complexity score**: keyword signals for code (+2), math (+2) and reasoning (+1), plus
+   long prompts and long conversations. Simple tasks (classify, translate, summarize) get −1.
+   A score of 2 or more goes to premium. Rules, not an LLM, so routing costs nothing.
+3. **Answer check**: a local answer that is truncated, empty, a refusal or invalid JSON is
+   discarded and the request **escalates** to premium with the original payload.
+4. **Circuit breaker**: after 3 local failures in a row, local is skipped for 30 s, so a
+   stopped Ollama doesn't add a failed call to every request.
+
+Local answers are cached like premium ones. Streamed requests that go local are answered in
+full, checked, then replayed as a stream.
 
 ## Configuration
 

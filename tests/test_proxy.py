@@ -4,6 +4,8 @@ import httpx
 import respx
 from fastapi.testclient import TestClient
 
+from tests.fakes import PREMIUM_URL
+
 COMPLETION = {
     "id": "chatcmpl-1",
     "object": "chat.completion",
@@ -22,13 +24,11 @@ REQUEST = {
 
 
 def test_health(client: TestClient):
-    assert client.get("/health").json() == {"status": "ok", "cache": "disabled"}
+    assert client.get("/health").json()["status"] == "ok"
 
 
 def test_forwards_to_premium_with_configured_model(client: TestClient, upstream: respx.MockRouter):
-    route = upstream.post("/chat/completions").mock(
-        return_value=httpx.Response(200, json=COMPLETION)
-    )
+    route = upstream.post(PREMIUM_URL).mock(return_value=httpx.Response(200, json=COMPLETION))
 
     response = client.post("/v1/chat/completions", json=REQUEST)
 
@@ -50,7 +50,7 @@ def test_forwards_to_premium_with_configured_model(client: TestClient, upstream:
 
 def test_passes_through_upstream_errors(client: TestClient, upstream: respx.MockRouter):
     error = {"error": {"message": "Rate limit reached", "type": "rate_limit_error"}}
-    upstream.post("/chat/completions").mock(return_value=httpx.Response(429, json=error))
+    upstream.post(PREMIUM_URL).mock(return_value=httpx.Response(429, json=error))
 
     response = client.post("/v1/chat/completions", json=REQUEST)
 
@@ -59,7 +59,7 @@ def test_passes_through_upstream_errors(client: TestClient, upstream: respx.Mock
 
 
 def test_timeout_returns_504(client: TestClient, upstream: respx.MockRouter):
-    upstream.post("/chat/completions").mock(side_effect=httpx.ReadTimeout("slow"))
+    upstream.post(PREMIUM_URL).mock(side_effect=httpx.ReadTimeout("slow"))
 
     response = client.post("/v1/chat/completions", json=REQUEST)
 
@@ -68,7 +68,7 @@ def test_timeout_returns_504(client: TestClient, upstream: respx.MockRouter):
 
 
 def test_unreachable_returns_502(client: TestClient, upstream: respx.MockRouter):
-    upstream.post("/chat/completions").mock(side_effect=httpx.ConnectError("refused"))
+    upstream.post(PREMIUM_URL).mock(side_effect=httpx.ConnectError("refused"))
 
     response = client.post("/v1/chat/completions", json=REQUEST)
 
@@ -82,7 +82,7 @@ def test_streams_sse_bytes(client: TestClient, upstream: respx.MockRouter):
         b'data: {"choices":[{"delta":{"content":"!"}}]}\n\n'
         b"data: [DONE]\n\n"
     )
-    route = upstream.post("/chat/completions").mock(
+    route = upstream.post(PREMIUM_URL).mock(
         return_value=httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
     )
 
@@ -96,7 +96,7 @@ def test_streams_sse_bytes(client: TestClient, upstream: respx.MockRouter):
 
 def test_stream_upstream_error_keeps_status(client: TestClient, upstream: respx.MockRouter):
     error = {"error": {"message": "Invalid API key", "type": "invalid_request_error"}}
-    upstream.post("/chat/completions").mock(return_value=httpx.Response(401, json=error))
+    upstream.post(PREMIUM_URL).mock(return_value=httpx.Response(401, json=error))
 
     response = client.post("/v1/chat/completions", json={**REQUEST, "stream": True})
 

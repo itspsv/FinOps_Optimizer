@@ -13,6 +13,7 @@ from finops.cache import SemanticCache
 from finops.core.config import Settings, get_settings
 from finops.core.logging import configure_logging
 from finops.providers import OpenAICompatibleProvider, Provider
+from finops.router import RoutingEngine
 
 logger = logging.getLogger(__name__)
 
@@ -20,17 +21,24 @@ logger = logging.getLogger(__name__)
 def create_app(
     settings: Settings | None = None,
     premium: Provider | None = None,
+    local: Provider | None = None,
     cache: SemanticCache | None = None,
 ) -> FastAPI:
-    """Build the proxy app. Tests can inject settings, a fake provider or a cache."""
+    """Build the proxy app. Tests can inject settings, fake providers or a cache."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         resolved = settings or get_settings()
         configure_logging(resolved.log_level)
         async with AsyncExitStack() as stack:
-            app.state.premium = premium or OpenAICompatibleProvider(resolved.premium)
-            stack.push_async_callback(app.state.premium.aclose)
+            premium_provider = premium or OpenAICompatibleProvider(resolved.premium)
+            stack.push_async_callback(premium_provider.aclose)
+            local_provider = local
+            if local_provider is None and resolved.routing.enabled and resolved.local:
+                local_provider = OpenAICompatibleProvider(resolved.local)
+            if local_provider is not None:
+                stack.push_async_callback(local_provider.aclose)
+            app.state.engine = RoutingEngine(premium_provider, local_provider, resolved.routing)
             app.state.cache = cache
             if cache is None and resolved.cache.enabled:
                 app.state.cache = await _build_cache(resolved, stack)

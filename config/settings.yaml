@@ -13,6 +13,27 @@ premium:
   model: openai/gpt-oss-120b
   timeout_s: 60
 
+# Free tier: Ollama's OpenAI-compatible endpoint on this machine.
+local:
+  name: ollama
+  base_url: http://localhost:11434/v1
+  model: llama3.2:3b
+  # Measured on an M1 8 GB: ~22 output tok/s, so 512 tokens is ~23 s worst case.
+  timeout_s: 30
+
+routing:
+  enabled: true
+  # Part of every cache key; bump it when routing rules change so old answers expire.
+  policy_version: v1
+  # Requests above these sizes always go to premium (local is slow on long text).
+  local_max_prompt_tokens: 1500
+  local_max_completion_tokens: 512
+  # Complexity score at or above this goes to premium. See finops/router/classifier.py.
+  complexity_threshold: 2
+  # After this many local failures in a row, skip local for cooldown_s.
+  breaker_failure_threshold: 3
+  breaker_cooldown_s: 30
+
 cache:
   enabled: true
   # Cosine similarity needed for a semantic hit. Starting point only;

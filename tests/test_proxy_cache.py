@@ -2,7 +2,7 @@ import httpx
 import respx
 from fastapi.testclient import TestClient
 
-from tests.fakes import InMemoryCacheStore
+from tests.fakes import PREMIUM_URL, InMemoryCacheStore
 
 COMPLETION = {
     "id": "chatcmpl-upstream",
@@ -29,9 +29,7 @@ def _ask(client: TestClient, text: str, **extra) -> httpx.Response:
 def test_repeat_question_is_served_from_cache(
     cached_client: TestClient, upstream: respx.MockRouter, cache_store: InMemoryCacheStore
 ):
-    route = upstream.post("/chat/completions").mock(
-        return_value=httpx.Response(200, json=COMPLETION)
-    )
+    route = upstream.post(PREMIUM_URL).mock(return_value=httpx.Response(200, json=COMPLETION))
 
     first = _ask(cached_client, "How do I reset my password?")
     second = _ask(cached_client, "How do I reset my password?")
@@ -51,7 +49,7 @@ def test_repeat_question_is_served_from_cache(
 
 
 def test_cache_hit_can_be_streamed(cached_client: TestClient, upstream: respx.MockRouter):
-    upstream.post("/chat/completions").mock(return_value=httpx.Response(200, json=COMPLETION))
+    upstream.post(PREMIUM_URL).mock(return_value=httpx.Response(200, json=COMPLETION))
     _ask(cached_client, "How do I reset my password?")
 
     response = _ask(cached_client, "How do I reset my password?", stream=True)
@@ -63,9 +61,7 @@ def test_cache_hit_can_be_streamed(cached_client: TestClient, upstream: respx.Mo
 
 
 def test_bypass_header_forces_upstream(cached_client: TestClient, upstream: respx.MockRouter):
-    route = upstream.post("/chat/completions").mock(
-        return_value=httpx.Response(200, json=COMPLETION)
-    )
+    route = upstream.post(PREMIUM_URL).mock(return_value=httpx.Response(200, json=COMPLETION))
     _ask(cached_client, "How do I reset my password?")
 
     response = _ask(
@@ -81,7 +77,7 @@ def test_bypass_header_forces_upstream(cached_client: TestClient, upstream: resp
 def test_upstream_errors_are_not_cached(
     cached_client: TestClient, upstream: respx.MockRouter, cache_store: InMemoryCacheStore
 ):
-    upstream.post("/chat/completions").mock(
+    upstream.post(PREMIUM_URL).mock(
         return_value=httpx.Response(429, json={"error": {"message": "slow down"}})
     )
 
@@ -93,7 +89,7 @@ def test_upstream_errors_are_not_cached(
 def test_cache_outage_still_answers(
     cached_client: TestClient, upstream: respx.MockRouter, cache_store: InMemoryCacheStore
 ):
-    upstream.post("/chat/completions").mock(return_value=httpx.Response(200, json=COMPLETION))
+    upstream.post(PREMIUM_URL).mock(return_value=httpx.Response(200, json=COMPLETION))
     cache_store.fail = True
 
     response = _ask(cached_client, "How do I reset my password?")

@@ -1,0 +1,90 @@
+import pytest
+
+from finops.core.config import RoutingSettings
+from finops.router import Tier, classify
+
+SETTINGS = RoutingSettings()
+
+
+def _ask(text: str, **params) -> dict:
+    return {"messages": [{"role": "user", "content": text}], **params}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Classify the sentiment as positive or negative: I love this product.",
+        "Translate 'good morning' into Spanish.",
+        "Summarize this in one sentence: The meeting moved to Friday.",
+        "What is the capital of France?",
+        "Fix the grammar: me and him goes to school.",
+        "Give me a title for a blog post about houseplants.",
+        "Is a computer faster than a calculator? Yes or no.",
+        "What happened on 2024-10-26?",
+    ],
+)
+def test_simple_prompts_go_local(text: str):
+    assert classify(_ask(text), SETTINGS).tier is Tier.LOCAL
+
+
+@pytest.mark.parametrize(
+    ("text", "signal"),
+    [
+        ("Write a Python function that merges two sorted lists.", "code"),
+        ("Why does this fail?\n```\nx = [1, 2\n```", "code_block"),
+        ("def add(a, b): return a + b  -- what's wrong here?", "code_syntax"),
+        ("What is 37 * 49 + 12?", "math_expression"),
+        ("Prove that the square root of 2 is irrational.", "math"),
+        ("Calculate the probability of rolling two sixes.", "math"),
+    ],
+)
+def test_code_and_math_go_premium(text: str, signal: str):
+    decision = classify(_ask(text), SETTINGS)
+    assert decision.tier is Tier.PREMIUM
+    assert signal in decision.signals
+
+
+def test_reasoning_alone_stays_local_but_adds_up():
+    one_signal = classify(_ask("Compare cats and dogs as pets."), SETTINGS)
+    two_signals = classify(
+        _ask("Compare these two architecture options and analyze the trade-offs."), SETTINGS
+    )
+    assert one_signal.tier is Tier.LOCAL
+    assert two_signals.tier is Tier.PREMIUM
+
+
+def test_simple_task_offsets_one_complexity_signal():
+    decision = classify(_ask("Summarize this design document in three bullets."), SETTINGS)
+    assert decision.tier is Tier.LOCAL
+    assert decision.reason == "simple_task"
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (_ask("hi", tools=[{"type": "function"}]), "tools"),
+        (
+            {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}]},
+            "multimodal",
+        ),
+        (_ask("hi", response_format={"type": "json_schema"}), "structured_output"),
+        (_ask("word " * 2000), "prompt_too_long"),
+        (_ask("hi", max_tokens=4000), "long_output_requested"),
+    ],
+)
+def test_hard_limits_force_premium(payload: dict, reason: str):
+    decision = classify(payload, SETTINGS)
+    assert decision.tier is Tier.PREMIUM
+    assert decision.reason == reason
+
+
+def test_long_conversation_counts_as_complexity():
+    history = [{"role": "user", "content": "hello"}] * 7
+    decision = classify({"messages": history}, SETTINGS)
+    assert "long_conversation" in decision.signals
+
+
+def test_client_override_wins():
+    code = _ask("Write a Python function.")
+    assert classify(code, SETTINGS, override="local").tier is Tier.LOCAL
+    assert classify(_ask("hi"), SETTINGS, override="premium").reason == "client_override"

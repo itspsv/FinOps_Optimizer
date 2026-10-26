@@ -41,6 +41,16 @@ class CacheSettings(BaseModel):
     model_cache_dir: Path = Path("~/.cache/finops/fastembed")
 
 
+class RoutingSettings(BaseModel):
+    enabled: bool = True
+    policy_version: str = "v1"
+    local_max_prompt_tokens: int = 1500
+    local_max_completion_tokens: int = 512
+    complexity_threshold: int = 2
+    breaker_failure_threshold: int = 3
+    breaker_cooldown_s: float = 30.0
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="FINOPS_",
@@ -53,6 +63,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: str = "postgresql:///finops"
     premium: ProviderSettings
+    local: ProviderSettings | None = None
+    routing: RoutingSettings = RoutingSettings()
     cache: CacheSettings = CacheSettings()
 
     @classmethod

@@ -10,6 +10,11 @@ from finops.cache.store import CacheMatch, NewEntry
 
 DIM = 64
 
+UPSTREAM = "https://upstream.test/v1"
+LOCAL_UPSTREAM = "http://local.test/v1"
+PREMIUM_URL = f"{UPSTREAM}/chat/completions"
+LOCAL_URL = f"{LOCAL_UPSTREAM}/chat/completions"
+
 
 class FakeEmbedder:
     """Bag-of-words hashing: prompts sharing most words get high cosine similarity."""
