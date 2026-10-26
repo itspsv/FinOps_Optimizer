@@ -110,6 +110,11 @@ class RoutingEngine:
 
         payload = state["payload"]
         local_payload = {**payload}
+        if self.settings.local_system_prompt:
+            local_payload["messages"] = [
+                {"role": "system", "content": self.settings.local_system_prompt},
+                *payload["messages"],
+            ]
         if not (payload.get("max_tokens") or payload.get("max_completion_tokens")):
             local_payload["max_tokens"] = self.settings.local_max_completion_tokens
 

@@ -67,6 +67,8 @@ def test_simple_prompt_is_answered_locally(routed_client: TestClient, upstream: 
     sent = json.loads(local.calls.last.request.content)
     assert sent["model"] == "test-local-model"
     assert sent["max_tokens"] == 512  # capped for the slow local model
+    assert sent["messages"][0]["role"] == "system"  # local-only conciseness hint
+    assert sent["messages"][1:] == [{"role": "user", "content": SIMPLE}]
 
 
 def test_complex_prompt_goes_to_premium(routed_client: TestClient, upstream: respx.MockRouter):
@@ -89,8 +91,10 @@ def test_bad_local_answer_escalates(routed_client: TestClient, upstream: respx.M
     assert response.headers["x-finops-route"] == "premium"
     assert response.headers["x-finops-escalated"] == "local_truncated"
     assert local.call_count == 1 and premium.call_count == 1
-    # The escalated call gets the client's original payload, without the local cap.
-    assert "max_tokens" not in json.loads(premium.calls.last.request.content)
+    # The escalated call gets the client's original payload, without local changes.
+    escalated = json.loads(premium.calls.last.request.content)
+    assert "max_tokens" not in escalated
+    assert escalated["messages"] == [{"role": "user", "content": SIMPLE}]
 
 
 def test_local_down_falls_back_then_breaker_skips_it(

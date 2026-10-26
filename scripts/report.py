@@ -1,6 +1,6 @@
 """Print the FinOps summary from the ledger.
 
-    uv run python scripts/report.py [--namespace NS] [--since-minutes N] [--json]
+uv run python scripts/report.py [--namespace NS] [--since-minutes N] [--json]
 """
 
 import argparse

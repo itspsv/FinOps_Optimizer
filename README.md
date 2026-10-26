@@ -7,9 +7,8 @@ A local-first proxy that sits between applications and paid LLM APIs and cuts co
 
 Every decision is recorded in a cost ledger and shown in a Streamlit dashboard.
 
-> **Status:** Step 4 of 5. OpenAI-compatible proxy with a two-tier exact + semantic cache on
-> pgvector, a LangGraph router that sends simple requests to a local Ollama model, and a
-> priced request ledger with a savings report.
+> **Status:** Step 5 of 6. Proxy, semantic cache, LangGraph router, priced ledger, and a
+> reproducible benchmark on public datasets. Next: Streamlit dashboard.
 
 ## Architecture (target)
 
@@ -149,6 +148,35 @@ curl localhost:8000/finops/summary       # same numbers over HTTP
 | Token deflection rate | Share of tokens answered by cache or local |
 | Savings | `sum(saved_usd) / sum(baseline_cost_usd)` |
 | Latency | p50 / p95 per route, from the ledger |
+
+## Benchmark
+
+A reproducible replay of public prompts measures everything above
+([benchmark/](benchmark/)). Data is fetched from the Hugging Face rows API and never committed.
+
+| Source | Used for |
+|---|---|
+| Databricks Dolly 15k | everyday tasks across 8 categories (mostly simple) |
+| GSM8K | math word problems (complex; answers checked exactly) |
+| HumanEval | coding problems (complex) |
+| Quora Question Pairs | human paraphrases (should hit the cache) and look-alikes (must not) |
+
+```bash
+make bench-data                 # download samples (~3 MB), build a 330-request workload
+make bench-calibrate            # pick the cache threshold on 2,000 labeled pairs (offline)
+make dev                        # in another terminal
+make bench-run RUN=full-1       # replay (~30 min on an M1; resumable)
+make bench-eval RUN=full-1      # LLM judge + GSM8K exact match
+make bench-report RUN=full-1    # -> benchmark/results/full-1/report.md
+```
+
+What the benchmark has already changed:
+
+- **Cache threshold 0.92 → 0.96.** On Quora pairs, hit precision was 0.80 at 0.92 and 0.89
+  at 0.96 (the ceiling given label noise).
+- **A brevity hint for the local model.** Open questions took 15–30 s locally and often hit
+  the token cap, then escalated anyway. With the hint, a 20-request sample took 2.2 min
+  instead of 4.9, with no escalations.
 
 ## Configuration
 

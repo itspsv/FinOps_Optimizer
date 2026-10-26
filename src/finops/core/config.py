@@ -33,7 +33,7 @@ class ProviderSettings(BaseModel):
 
 class CacheSettings(BaseModel):
     enabled: bool = True
-    similarity_threshold: float = Field(0.92, ge=0, le=1)
+    similarity_threshold: float = Field(0.96, ge=0, le=1)
     ttl_s: int = 86400
     max_temperature: float = 1.0
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -46,6 +46,12 @@ class RoutingSettings(BaseModel):
     policy_version: str = "v1"
     local_max_prompt_tokens: int = 1500
     local_max_completion_tokens: int = 512
+    # Prepended for the local model only. Small models ramble, and at ~22 tokens/s on an
+    # M1 a rambling answer is slow and often truncated (then escalated anyway).
+    local_system_prompt: str | None = (
+        "Answer concisely and directly, in at most about 150 words, "
+        "unless the task clearly needs a longer answer."
+    )
     complexity_threshold: int = 2
     breaker_failure_threshold: int = 3
     breaker_cooldown_s: float = 30.0

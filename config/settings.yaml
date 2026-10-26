@@ -28,6 +28,11 @@ routing:
   # Requests above these sizes always go to premium (local is slow on long text).
   local_max_prompt_tokens: 1500
   local_max_completion_tokens: 512
+  # Sent to the local model only; the benchmark showed 3B answers to open questions
+  # running 15-30 s and often hitting the token cap without it. Set to null to disable.
+  local_system_prompt: >-
+    Answer concisely and directly, in at most about 150 words,
+    unless the task clearly needs a longer answer.
   # Complexity score at or above this goes to premium. See finops/router/classifier.py.
   complexity_threshold: 2
   # After this many local failures in a row, skip local for cooldown_s.
@@ -36,9 +41,9 @@ routing:
 
 cache:
   enabled: true
-  # Cosine similarity needed for a semantic hit. Starting point only;
-  # the benchmark step calibrates it on labeled paraphrase pairs.
-  similarity_threshold: 0.92
+  # Cosine similarity needed for a semantic hit. Calibrated on 2,000 Quora pairs
+  # (`make bench-calibrate`): precision 0.89 vs 0.80 at the old 0.92.
+  similarity_threshold: 0.96
   ttl_s: 86400
   # Requests above this temperature want varied answers, so we don't cache them.
   max_temperature: 1.0
