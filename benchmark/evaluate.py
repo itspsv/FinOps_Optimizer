@@ -107,6 +107,10 @@ def parse_verdict(text: str) -> tuple[str, str]:
     return "error", f"unparseable judge output: {text[:200]}"
 
 
+class DailyLimitReached(RuntimeError):
+    """Groq's tokens-per-day cap: retrying won't help until the rolling window frees up."""
+
+
 class TokenBudget:
     """Keeps tokens sent in any 60 s window under a budget (Groq free tier: 8,000 TPM)."""
 
@@ -161,6 +165,8 @@ class GroqClient:
                 ):
                     payload.pop("reasoning_effort", None) or payload.pop("response_format", None)
                     continue
+                if exc.status_code == 429 and "per day" in json.dumps(exc.body):
+                    raise DailyLimitReached(exc.body["error"]["message"]) from exc
                 if exc.status_code not in (429, 500, 502, 503, 504) or attempt == 6:
                     raise
                 wait = 20 * attempt

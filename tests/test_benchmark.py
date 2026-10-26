@@ -221,3 +221,37 @@ def test_compare_render():
     text = compare.render({"v1": summary(3), "v2": summary(1)})
     assert "| Metric | v1 | v2 |" in text
     assert "75.0% (n=4)" in text
+
+
+def test_localeval_summary():
+    from benchmark import localeval
+    from benchmark.localeval import LocalAnswer
+
+    answers = {
+        ("math", "a"): LocalAnswer("a", "math", "18", "stop", 10, 1000.0, correct=True),
+        ("math", "b"): LocalAnswer("b", "math", "7", "length", 20, 2000.0, correct=False),
+        ("knowledge", "c"): LocalAnswer("c", "knowledge", "x", "stop", 5, 500.0, verdict="pass"),
+        ("knowledge", "d"): LocalAnswer("d", "knowledge", None, None, 0, 0.0, error="502"),
+    }
+    summary = localeval.summarize("m", answers)
+    assert summary["math"]["accuracy"] == 0.5
+    assert summary["math"]["truncated"] == 1
+    assert summary["knowledge"]["n"] == 1  # errors excluded
+    assert summary["knowledge"]["pass_rate"] == 1.0
+
+
+async def test_daily_limit_stops_retries():
+    from finops.providers import ProviderError
+
+    class Capped:
+        calls = 0
+
+        async def chat(self, payload):
+            self.calls += 1
+            raise ProviderError(429, {"error": {"message": "tokens per day (TPD): Limit 200000"}})
+
+    provider = Capped()
+    groq = evaluate.GroqClient(provider, evaluate.TokenBudget(8000), sleep=lambda s: None)
+    with pytest.raises(evaluate.DailyLimitReached):
+        await groq.ask([{"role": "user", "content": "hi"}], max_tokens=5)
+    assert provider.calls == 1

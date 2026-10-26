@@ -17,9 +17,11 @@ premium:
 local:
   name: ollama
   base_url: http://localhost:11434/v1
-  model: llama3.2:3b
-  # Measured on an M1 8 GB: ~22 output tok/s, so 512 tokens is ~23 s worst case.
-  timeout_s: 30
+  # Qwen3 4B Instruct (Q4_K_M, 2.5 GB, Apache 2.0): stronger at math and knowledge than
+  # llama3.2:3b, no "thinking" mode. About 2/3 of llama's speed on an M1 8 GB.
+  model: qwen3:4b-instruct
+  # 512 output tokens at ~15 tok/s is ~35 s, so allow 45 s before giving up.
+  timeout_s: 45
 
 routing:
   enabled: true

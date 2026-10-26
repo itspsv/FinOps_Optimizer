@@ -21,3 +21,4 @@ models:
 
   # Local models on our own hardware: no per-token API cost.
   llama3.2:3b: {input_per_1m: 0.0, output_per_1m: 0.0}
+  qwen3:4b-instruct: {input_per_1m: 0.0, output_per_1m: 0.0}
