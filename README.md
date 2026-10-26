@@ -7,8 +7,9 @@ A local-first proxy that sits between applications and paid LLM APIs and cuts co
 
 Every decision is recorded in a cost ledger and shown in a Streamlit dashboard.
 
-> **Status:** Step 3 of 5. OpenAI-compatible proxy with a two-tier exact + semantic cache on
-> pgvector, and a LangGraph router that sends simple requests to a local Ollama model.
+> **Status:** Step 4 of 5. OpenAI-compatible proxy with a two-tier exact + semantic cache on
+> pgvector, a LangGraph router that sends simple requests to a local Ollama model, and a
+> priced request ledger with a savings report.
 
 ## Architecture (target)
 
@@ -37,8 +38,9 @@ ollama pull llama3.2:3b      # ~2 GB local model
 make install                 # creates .venv with Python 3.12 and installs deps
 cp .env.example .env         # then put your Groq API key in .env
 createdb finops              # once; needs `brew install pgvector`
-make db-init                 # creates the pgvector extension and cache table
+make db-init                 # creates the pgvector extension, cache and ledger tables
 make dev                     # starts the proxy on http://localhost:8000
+make report                  # savings summary from the ledger
 ```
 
 ## Using the proxy
@@ -115,6 +117,38 @@ classify ─┬─ local ──▶ Ollama ──▶ answer ok? ── yes ──
 
 Local answers are cached like premium ones. Streamed requests that go local are answered in
 full, checked, then replayed as a stream.
+
+## Cost ledger
+
+Every request writes one row to the `request_log` table after the response is sent: route,
+cache result, router decision, escalation, tokens, latency and cost. Prices live in
+[config/pricing.yaml](config/pricing.yaml) with a version that is stored on every row.
+
+| Column | Meaning |
+|---|---|
+| `baseline_cost_usd` | What the request would cost with no optimizer: all traffic on the baseline model (GPT-6.1 Sol list price) |
+| `cost_usd` | What its route costs: premium priced as the baseline model, local and cache $0 |
+| `saved_usd` | `baseline_cost_usd - cost_usd` |
+| `billed_usd` | What was actually paid (Groq's real price), kept separate for honesty |
+| `tokens_estimated` | True when a streamed answer reported no usage and tokens were estimated |
+
+Premium calls go to Groq during development but are **priced as a commercial API**, so the
+savings model a company paying list prices. Token counts are those of the answer actually
+served; for local answers that is the local model's own count.
+
+```bash
+make report                              # all traffic
+make report ARGS="--namespace demo"      # one tenant
+make report ARGS="--since-minutes 60 --json"
+curl localhost:8000/finops/summary       # same numbers over HTTP
+```
+
+| Metric | Definition |
+|---|---|
+| Deflection rate | Share of served requests answered by cache or local |
+| Token deflection rate | Share of tokens answered by cache or local |
+| Savings | `sum(saved_usd) / sum(baseline_cost_usd)` |
+| Latency | p50 / p95 per route, from the ledger |
 
 ## Configuration
 

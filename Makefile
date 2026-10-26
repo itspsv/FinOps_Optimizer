@@ -1,4 +1,4 @@
-.PHONY: install db-init dev test lint format
+.PHONY: install db-init dev report test lint format
 
 install:
 	uv sync
@@ -8,6 +8,9 @@ db-init:
 
 dev:
 	uv run uvicorn finops.api.main:app --reload --port 8000
+
+report:
+	uv run python scripts/report.py $(ARGS)
 
 test:
 	uv run pytest -q

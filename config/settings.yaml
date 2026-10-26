@@ -46,3 +46,7 @@ cache:
   embedding_model: BAAI/bge-small-en-v1.5
   embedding_dim: 384
   model_cache_dir: ~/.cache/finops/fastembed
+
+ledger:
+  # Records every request in the request_log table. Prices: config/pricing.yaml.
+  enabled: true

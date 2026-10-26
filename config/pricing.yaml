@@ -1,0 +1,23 @@
+# Prices in USD per 1M tokens. Every ledger row records `version`, so old rows stay
+# explainable after prices change. Update `version` whenever you edit this file.
+version: "2026-10-26"
+
+# What every request would have cost with no optimizer: all traffic to this model.
+baseline_model: gpt-6.1-sol
+
+# The premium tier is served by Groq for free during development, but priced as if it
+# were this commercial API. Real Groq cost is tracked separately as `billed_usd`.
+premium_priced_as: gpt-6.1-sol
+
+models:
+  # OpenAI list prices, standard processing, https://openai.com/api/pricing/ (2026-10-26)
+  gpt-6-astra: {input_per_1m: 10.00, output_per_1m: 50.00}
+  gpt-6.1-sol: {input_per_1m: 2.00, output_per_1m: 10.00}
+  gpt-6-luna: {input_per_1m: 0.10, output_per_1m: 0.50}
+
+  # Groq developer plan, https://console.groq.com/docs/models (2026-10-26)
+  openai/gpt-oss-120b: {input_per_1m: 0.15, output_per_1m: 0.60}
+  openai/gpt-oss-20b: {input_per_1m: 0.075, output_per_1m: 0.30}
+
+  # Local models on our own hardware: no per-token API cost.
+  llama3.2:3b: {input_per_1m: 0.0, output_per_1m: 0.0}

@@ -51,6 +51,11 @@ class RoutingSettings(BaseModel):
     breaker_cooldown_s: float = 30.0
 
 
+class LedgerSettings(BaseModel):
+    enabled: bool = True
+    pricing_file: Path = PROJECT_ROOT / "config" / "pricing.yaml"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="FINOPS_",
@@ -66,6 +71,7 @@ class Settings(BaseSettings):
     local: ProviderSettings | None = None
     routing: RoutingSettings = RoutingSettings()
     cache: CacheSettings = CacheSettings()
+    ledger: LedgerSettings = LedgerSettings()
 
     @classmethod
     def settings_customise_sources(

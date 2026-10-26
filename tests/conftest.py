@@ -6,8 +6,22 @@ from fastapi.testclient import TestClient
 
 from finops.api.main import create_app
 from finops.cache import SemanticCache
-from finops.core.config import CacheSettings, ProviderSettings, RoutingSettings, Settings
-from tests.fakes import LOCAL_UPSTREAM, UPSTREAM, FakeEmbedder, InMemoryCacheStore
+from finops.core.config import (
+    CacheSettings,
+    LedgerSettings,
+    ProviderSettings,
+    RoutingSettings,
+    Settings,
+)
+from finops.ledger import Ledger, PriceTable
+from finops.ledger.pricing import ModelPrice
+from tests.fakes import (
+    LOCAL_UPSTREAM,
+    UPSTREAM,
+    FakeEmbedder,
+    InMemoryCacheStore,
+    InMemoryLedgerStore,
+)
 
 
 @pytest.fixture
@@ -17,6 +31,9 @@ def settings() -> Settings:
         log_level="DEBUG",
         cache=CacheSettings(enabled=False, similarity_threshold=0.8),
         routing=RoutingSettings(enabled=False),
+        # Never touch the real database from tests; ledger tests inject a fake.
+        ledger=LedgerSettings(enabled=False),
+        database_url="postgresql:///finops_test",
         premium=ProviderSettings(
             name="groq",
             base_url=UPSTREAM,
@@ -76,6 +93,39 @@ def cached_client(
     settings: Settings, upstream: respx.MockRouter, cache: SemanticCache
 ) -> Iterator[TestClient]:
     with TestClient(create_app(settings=settings, cache=cache)) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def prices() -> PriceTable:
+    return PriceTable(
+        version="test",
+        baseline_model="baseline",
+        premium_priced_as="baseline",
+        models={
+            "baseline": ModelPrice(input_per_1m=2.0, output_per_1m=10.0),
+            "test-premium-model": ModelPrice(input_per_1m=0.15, output_per_1m=0.60),
+            "test-local-model": ModelPrice(input_per_1m=0.0, output_per_1m=0.0),
+        },
+    )
+
+
+@pytest.fixture
+def ledger_store() -> InMemoryLedgerStore:
+    return InMemoryLedgerStore()
+
+
+@pytest.fixture
+def ledger(ledger_store: InMemoryLedgerStore, prices: PriceTable) -> Ledger:
+    return Ledger(ledger_store, prices)
+
+
+@pytest.fixture
+def ledger_client(
+    routed_settings: Settings, upstream: respx.MockRouter, cache: SemanticCache, ledger: Ledger
+) -> Iterator[TestClient]:
+    app = create_app(settings=routed_settings, cache=cache, ledger=ledger)
+    with TestClient(app) as test_client:
         yield test_client
 
 

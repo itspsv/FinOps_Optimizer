@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 
 from finops.cache.keys import CacheKeys
 from finops.cache.store import CacheMatch, NewEntry
+from finops.ledger.models import LedgerRow
+from finops.ledger.store import build_summary
 
 DIM = 64
 
@@ -97,3 +99,42 @@ def _cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
     return dot / norm if norm else 0.0
+
+
+@dataclass
+class InMemoryLedgerStore:
+    """Mirrors PgLedgerStore's aggregation in Python."""
+
+    rows: list[LedgerRow] = field(default_factory=list)
+
+    async def insert(self, row: LedgerRow) -> None:
+        self.rows.append(row)
+
+    async def summary(self, namespace: str | None, since_minutes: int | None) -> dict:
+        rows = [r for r in self.rows if namespace is None or r.event.namespace == namespace]
+        ok = [r for r in rows if r.event.status_code < 400]
+        by_route = {}
+        for route in {r.event.route for r in ok}:
+            group = [r for r in ok if r.event.route == route]
+            latencies = sorted(r.event.latency_ms for r in group)
+            by_route[route] = {
+                "requests": len(group),
+                "escalations": sum(r.event.escalation_reason is not None for r in group),
+                "prompt_tokens": sum(r.event.prompt_tokens for r in group),
+                "completion_tokens": sum(r.event.completion_tokens for r in group),
+                "avg_ms": sum(latencies) / len(latencies),
+                "p50_ms": _percentile(latencies, 0.5),
+                "p95_ms": _percentile(latencies, 0.95),
+                "baseline_usd": sum(r.baseline_cost_usd for r in group),
+                "cost_usd": sum(r.cost_usd for r in group),
+                "saved_usd": sum(r.saved_usd for r in group),
+                "billed_usd": sum(r.billed_usd or 0 for r in group),
+            }
+        return build_summary(by_route, len(rows) - len(ok))
+
+
+def _percentile(values: list[float], q: float) -> float:
+    """Linear interpolation, like Postgres percentile_cont."""
+    pos = (len(values) - 1) * q
+    low, high = math.floor(pos), math.ceil(pos)
+    return values[low] + (values[high] - values[low]) * (pos - low)

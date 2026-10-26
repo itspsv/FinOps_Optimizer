@@ -3,15 +3,17 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from starlette.background import BackgroundTask
+from starlette.background import BackgroundTasks
 
 from finops.api.schemas import ChatCompletionRequest
-from finops.api.streaming import completion_to_sse
+from finops.api.streaming import StreamTap, completion_to_sse
 from finops.cache import CacheLookup, SemanticCache
+from finops.ledger import Ledger, RequestEvent, usage_tokens
 from finops.providers import ProviderError
 from finops.router import RouteDecision, RouteOutcome, RoutingEngine, Tier
+from finops.router.classifier import estimate_tokens
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -27,139 +29,234 @@ async def health(request: Request) -> dict[str, str]:
     return {
         "status": "ok",
         "cache": "enabled" if request.app.state.cache is not None else "disabled",
+        "ledger": "enabled" if request.app.state.ledger is not None else "disabled",
         "routing": "enabled" if engine.local is not None else "disabled",
         "local_breaker": engine.breaker.state if engine.local is not None else "n/a",
     }
 
 
+@router.get("/finops/summary")
+async def finops_summary(
+    request: Request, namespace: str | None = None, since_minutes: int | None = None
+) -> dict[str, Any]:
+    ledger: Ledger | None = request.app.state.ledger
+    if ledger is None:
+        raise HTTPException(503, "ledger is disabled or the database is unavailable")
+    return await ledger.summary(namespace, since_minutes)
+
+
+class _Request:
+    """Per-request context shared by the response paths below."""
+
+    def __init__(self, request: Request, body: ChatCompletionRequest):
+        self.engine: RoutingEngine = request.app.state.engine
+        self.cache: SemanticCache | None = request.app.state.cache
+        self.ledger: Ledger | None = request.app.state.ledger
+        self.body = body
+        self.id = f"req_{uuid.uuid4().hex[:16]}"
+        self.started = time.perf_counter()
+        self.namespace = request.headers.get(NAMESPACE_HEADER, "default")
+        self.headers = {"x-finops-request-id": self.id}
+        self.tasks = BackgroundTasks()
+        self.lookup: CacheLookup | None = None
+        self.decision: RouteDecision | None = None
+
+    def elapsed_ms(self) -> float:
+        return (time.perf_counter() - self.started) * 1000
+
+    def record(self, **fields: Any) -> None:
+        """Queue a ledger write for after the response is sent."""
+        if self.ledger is None:
+            return
+        lookup, decision = self.lookup, self.decision
+        event = RequestEvent(
+            request_id=self.id,
+            namespace=self.namespace,
+            requested_model=self.body.model,
+            stream=self.body.stream,
+            cache_status=lookup.status.value if lookup else None,
+            cache_similarity=lookup.nearest_similarity if lookup else None,
+            decision_tier=decision.tier.value if decision else None,
+            decision_reason=decision.reason if decision else None,
+            complexity_score=decision.score if decision else None,
+            **fields,
+        )
+        self.tasks.add_task(self.ledger.record, event)
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(body: ChatCompletionRequest, request: Request) -> Response:
-    engine: RoutingEngine = request.app.state.engine
-    cache: SemanticCache | None = request.app.state.cache
-    request_id = f"req_{uuid.uuid4().hex[:16]}"
-    started = time.perf_counter()
+    ctx = _Request(request, body)
     payload = body.upstream_payload()
-    headers = {"x-finops-request-id": request_id}
 
-    lookup: CacheLookup | None = None
-    if cache is not None:
-        lookup = await cache.lookup(
+    if ctx.cache is not None:
+        ctx.lookup = await ctx.cache.lookup(
             payload,
-            model_scope=engine.cache_scope,
-            namespace=request.headers.get(NAMESPACE_HEADER, "default"),
+            model_scope=ctx.engine.cache_scope,
+            namespace=ctx.namespace,
             bypass=request.headers.get(CACHE_CONTROL_HEADER, "").lower() == "bypass",
         )
-        headers["x-finops-cache"] = lookup.status.value
-        if lookup.nearest_similarity is not None:
-            headers["x-finops-cache-similarity"] = f"{lookup.nearest_similarity:.4f}"
+        ctx.headers["x-finops-cache"] = ctx.lookup.status.value
+        if ctx.lookup.nearest_similarity is not None:
+            ctx.headers["x-finops-cache-similarity"] = f"{ctx.lookup.nearest_similarity:.4f}"
+        if ctx.lookup.is_hit:
+            return _serve_from_cache(ctx)
 
-    if lookup is not None and lookup.is_hit:
-        return _serve_from_cache(cache, lookup, body, request_id, headers, started)
-
-    decision = engine.decide(payload, request.headers.get(ROUTE_OVERRIDE_HEADER, "").lower())
-    headers["x-finops-route-reason"] = decision.reason
-    headers["x-finops-complexity"] = str(decision.score)
+    ctx.decision = ctx.engine.decide(
+        payload, request.headers.get(ROUTE_OVERRIDE_HEADER, "").lower()
+    )
+    ctx.headers["x-finops-route-reason"] = ctx.decision.reason
+    ctx.headers["x-finops-complexity"] = str(ctx.decision.score)
 
     try:
-        if body.stream and decision.tier is Tier.PREMIUM:
-            # True passthrough streaming. Streamed premium answers aren't cached yet.
-            chunks = await engine.premium.stream(payload)
-            headers |= {"x-finops-route": "premium", "x-finops-provider": engine.premium.name}
-            _log(request_id, lookup, decision, None, started, stream=True)
-            return StreamingResponse(chunks, media_type="text/event-stream", headers=headers)
+        if body.stream and ctx.decision.tier is Tier.PREMIUM:
+            return await _stream_premium(ctx, payload)
         # Local answers are checked before use, so they're buffered and replayed if
         # the client asked for a stream. Short local answers take well under a second.
-        outcome = await engine.run(payload, decision)
+        outcome = await ctx.engine.run(payload, ctx.decision)
     except ProviderError as exc:
         logger.warning(
             "request_id=%s route=%s status=%s error=%s",
-            request_id,
-            decision.tier.value,
+            ctx.id,
+            ctx.decision.tier.value,
             exc.status_code,
             exc.body,
         )
-        return JSONResponse(exc.body, status_code=exc.status_code, headers=headers)
+        ctx.record(
+            status_code=exc.status_code,
+            route=ctx.decision.tier.value,
+            latency_ms=ctx.elapsed_ms(),
+        )
+        return JSONResponse(
+            exc.body, status_code=exc.status_code, headers=ctx.headers, background=ctx.tasks
+        )
 
-    headers |= {
+    return _serve_outcome(ctx, outcome)
+
+
+def _serve_outcome(ctx: _Request, outcome: RouteOutcome) -> Response:
+    latency_ms = ctx.elapsed_ms()
+    ctx.headers |= {
         "x-finops-route": outcome.route.value,
         "x-finops-provider": outcome.provider,
-        "x-finops-latency-ms": f"{_elapsed_ms(started):.1f}",
+        "x-finops-latency-ms": f"{latency_ms:.1f}",
     }
     if outcome.escalated:
-        headers["x-finops-escalated"] = outcome.escalation_reason
-    _log(request_id, lookup, decision, outcome, started)
+        ctx.headers["x-finops-escalated"] = outcome.escalation_reason
+    prompt_tokens, completion_tokens = usage_tokens(outcome.response)
+    _log(ctx, outcome.route.value, prompt_tokens, completion_tokens, latency_ms, outcome)
 
-    # Write to the cache after the response is sent, so a miss pays no extra latency.
-    background = BackgroundTask(cache.store, lookup, outcome.response) if cache and lookup else None
-    if body.stream:
+    # Cache and ledger writes run after the response is sent: no added latency.
+    if ctx.cache and ctx.lookup:
+        ctx.tasks.add_task(ctx.cache.store, ctx.lookup, outcome.response)
+    ctx.record(
+        status_code=200,
+        route=outcome.route.value,
+        latency_ms=latency_ms,
+        escalation_reason=outcome.escalation_reason,
+        provider=outcome.provider,
+        upstream_model=outcome.response.get("model"),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        local_latency_ms=outcome.local_latency_ms,
+        premium_latency_ms=outcome.premium_latency_ms,
+    )
+    if ctx.body.stream:
         return StreamingResponse(
             completion_to_sse(outcome.response),
             media_type="text/event-stream",
-            headers=headers,
-            background=background,
+            headers=ctx.headers,
+            background=ctx.tasks,
         )
-    return JSONResponse(outcome.response, headers=headers, background=background)
+    return JSONResponse(outcome.response, headers=ctx.headers, background=ctx.tasks)
 
 
-def _serve_from_cache(
-    cache: SemanticCache,
-    lookup: CacheLookup,
-    body: ChatCompletionRequest,
-    request_id: str,
-    headers: dict[str, str],
-    started: float,
-) -> Response:
-    completion: dict[str, Any] = {**lookup.match.response, "id": f"chatcmpl-{request_id}"}
-    latency_ms = _elapsed_ms(started)
-    headers["x-finops-route"] = "cache"
-    headers["x-finops-latency-ms"] = f"{latency_ms:.1f}"
-    usage = completion.get("usage") or {}
-    logger.info(
-        "request_id=%s route=cache cache=%s similarity=%.4f saved_prompt_tokens=%s "
-        "saved_completion_tokens=%s latency_ms=%.1f",
-        request_id,
-        lookup.status.value,
-        lookup.match.similarity,
-        usage.get("prompt_tokens"),
-        usage.get("completion_tokens"),
-        latency_ms,
+async def _stream_premium(ctx: _Request, payload: dict[str, Any]) -> Response:
+    """True passthrough streaming. Streamed premium answers aren't cached yet."""
+    premium = ctx.engine.premium
+    tap = StreamTap(await premium.stream(payload))
+    ctx.headers |= {"x-finops-route": "premium", "x-finops-provider": premium.name}
+
+    async def record_when_done() -> None:
+        # Runs after the last chunk is sent, so the tap has seen the whole answer.
+        prompt_tokens, completion_tokens = usage_tokens({"usage": tap.usage})
+        estimated = tap.usage is None
+        if estimated:
+            prompt_tokens = ctx.decision.prompt_tokens_est
+            completion_tokens = estimate_tokens(tap.text)
+        latency_ms = ctx.elapsed_ms()
+        _log(ctx, "premium", prompt_tokens, completion_tokens, latency_ms, stream=True)
+        ctx.record(
+            status_code=200,
+            route="premium",
+            latency_ms=latency_ms,
+            provider=premium.name,
+            upstream_model=tap.model or premium.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            tokens_estimated=estimated,
+            premium_latency_ms=latency_ms,
+        )
+        await ctx.tasks()
+
+    return StreamingResponse(
+        tap, media_type="text/event-stream", headers=ctx.headers, background=record_when_done
     )
-    background = BackgroundTask(cache.record_hit, lookup)
-    if body.stream:
+
+
+def _serve_from_cache(ctx: _Request) -> Response:
+    lookup = ctx.lookup
+    completion: dict[str, Any] = {**lookup.match.response, "id": f"chatcmpl-{ctx.id}"}
+    latency_ms = ctx.elapsed_ms()
+    ctx.headers["x-finops-route"] = "cache"
+    ctx.headers["x-finops-latency-ms"] = f"{latency_ms:.1f}"
+    prompt_tokens, completion_tokens = usage_tokens(completion)
+    _log(ctx, "cache", prompt_tokens, completion_tokens, latency_ms)
+
+    ctx.tasks.add_task(ctx.cache.record_hit, lookup)
+    ctx.record(
+        status_code=200,
+        route="cache",
+        latency_ms=latency_ms,
+        provider="cache",
+        upstream_model=completion.get("model"),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+    if ctx.body.stream:
         return StreamingResponse(
             completion_to_sse(completion),
             media_type="text/event-stream",
-            headers=headers,
-            background=background,
+            headers=ctx.headers,
+            background=ctx.tasks,
         )
-    return JSONResponse(completion, headers=headers, background=background)
+    return JSONResponse(completion, headers=ctx.headers, background=ctx.tasks)
 
 
 def _log(
-    request_id: str,
-    lookup: CacheLookup | None,
-    decision: RouteDecision,
-    outcome: RouteOutcome | None,
-    started: float,
+    ctx: _Request,
+    route: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    latency_ms: float,
+    outcome: RouteOutcome | None = None,
     stream: bool = False,
 ) -> None:
-    usage = (outcome.response.get("usage") if outcome else None) or {}
     logger.info(
-        "request_id=%s route=%s cache=%s decision=%s reason=%s score=%s escalated=%s "
-        "stream=%s prompt_tokens=%s completion_tokens=%s latency_ms=%.1f",
-        request_id,
-        outcome.route.value if outcome else decision.tier.value,
-        lookup.status.value if lookup else "disabled",
-        decision.tier.value,
-        decision.reason,
-        decision.score,
+        "request_id=%s route=%s cache=%s similarity=%s decision=%s reason=%s score=%s "
+        "escalated=%s stream=%s prompt_tokens=%s completion_tokens=%s latency_ms=%.1f",
+        ctx.id,
+        route,
+        ctx.lookup.status.value if ctx.lookup else "disabled",
+        f"{ctx.lookup.nearest_similarity:.4f}"
+        if ctx.lookup and ctx.lookup.nearest_similarity
+        else None,
+        ctx.decision.tier.value if ctx.decision else None,
+        ctx.decision.reason if ctx.decision else None,
+        ctx.decision.score if ctx.decision else None,
         outcome.escalation_reason if outcome else None,
         stream,
-        usage.get("prompt_tokens"),
-        usage.get("completion_tokens"),
-        _elapsed_ms(started),
+        prompt_tokens,
+        completion_tokens,
+        latency_ms,
     )
-
-
-def _elapsed_ms(started: float) -> float:
-    return (time.perf_counter() - started) * 1000

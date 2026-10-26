@@ -12,6 +12,7 @@ from finops.api.routes import router
 from finops.cache import SemanticCache
 from finops.core.config import Settings, get_settings
 from finops.core.logging import configure_logging
+from finops.ledger import Ledger, PriceTable
 from finops.providers import OpenAICompatibleProvider, Provider
 from finops.router import RoutingEngine
 
@@ -23,8 +24,9 @@ def create_app(
     premium: Provider | None = None,
     local: Provider | None = None,
     cache: SemanticCache | None = None,
+    ledger: Ledger | None = None,
 ) -> FastAPI:
-    """Build the proxy app. Tests can inject settings, fake providers or a cache."""
+    """Build the proxy app. Tests can inject settings, fake providers, a cache or a ledger."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -39,9 +41,15 @@ def create_app(
             if local_provider is not None:
                 stack.push_async_callback(local_provider.aclose)
             app.state.engine = RoutingEngine(premium_provider, local_provider, resolved.routing)
-            app.state.cache = cache
-            if cache is None and resolved.cache.enabled:
-                app.state.cache = await _build_cache(resolved, stack)
+            app.state.cache, app.state.ledger = cache, ledger
+            needs_db = (cache is None and resolved.cache.enabled) or (
+                ledger is None and resolved.ledger.enabled
+            )
+            pool = await _open_pool(resolved, stack) if needs_db else None
+            if pool is not None and cache is None and resolved.cache.enabled:
+                app.state.cache = await _build_cache(resolved, pool)
+            if pool is not None and ledger is None and resolved.ledger.enabled:
+                app.state.ledger = _build_ledger(resolved, pool)
             yield
 
     app = FastAPI(title="AI FinOps Optimizer", version=__version__, lifespan=lifespan)
@@ -65,15 +73,25 @@ def create_app(
     return app
 
 
-async def _build_cache(settings: Settings, stack: AsyncExitStack) -> SemanticCache | None:
-    """Start the cache, or run without it if Postgres or the embedder is unavailable."""
-    from finops.cache.embeddings import FastEmbedEmbedder
-    from finops.cache.store import PgVectorCacheStore
+async def _open_pool(settings: Settings, stack: AsyncExitStack):
+    """One pool for the cache and the ledger, or None if Postgres is unreachable."""
     from finops.db.pool import open_pool
 
     try:
         pool = await open_pool(settings.database_url)
-        stack.push_async_callback(pool.close)
+    except Exception:
+        logger.exception("database unavailable; starting without cache and ledger")
+        return None
+    stack.push_async_callback(pool.close)
+    return pool
+
+
+async def _build_cache(settings: Settings, pool) -> SemanticCache | None:
+    """Start the cache, or run without it if the embedder can't load."""
+    from finops.cache.embeddings import FastEmbedEmbedder
+    from finops.cache.store import PgVectorCacheStore
+
+    try:
         embedder = FastEmbedEmbedder(
             settings.cache.embedding_model,
             cache_dir=str(settings.cache.model_cache_dir.expanduser()),
@@ -84,6 +102,15 @@ async def _build_cache(settings: Settings, stack: AsyncExitStack) -> SemanticCac
         return None
     logger.info("semantic cache ready (model=%s)", settings.cache.embedding_model)
     return SemanticCache(PgVectorCacheStore(pool), embedder, settings.cache)
+
+
+def _build_ledger(settings: Settings, pool) -> Ledger:
+    from finops.ledger.store import PgLedgerStore
+
+    # A bad pricing file should stop startup: every reported number depends on it.
+    prices = PriceTable.load(settings.ledger.pricing_file)
+    logger.info("ledger ready (pricing %s, baseline %s)", prices.version, prices.baseline_model)
+    return Ledger(PgLedgerStore(pool), prices)
 
 
 app = create_app()
