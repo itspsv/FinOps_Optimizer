@@ -273,3 +273,16 @@ def test_replay_stops_at_groq_daily_cap(tmp_path, monkeypatch):
     assert route.call_count == 1  # no retries and no further requests
     assert replay.load_results(path)["a"].daily_cap is True
     assert replay.load_results(path)["a"].status == 429
+
+
+def test_subset_keeps_groups_mix_and_order(fake_datasets):
+    items = workload.build(SMALL, seed=1)
+    half = workload.subset(items, 0.5)
+    ids = {i.id for i in half}
+
+    assert 0.3 < len(half) / len(items) < 0.7
+    assert all(i.original_id in ids for i in half if i.original_id)  # dependents keep originals
+    assert [i.id for i in half] == [i.id for i in items if i.id in ids]  # same order
+    assert {i.source for i in half} == {i.source for i in items}
+    assert sum(i.kind == "repeat" for i in half) == 3  # 6 repeats in the full mix: stays 50%
+    assert [i.id for i in workload.subset(items, 0.5)] == [i.id for i in half]  # reproducible

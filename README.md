@@ -186,13 +186,18 @@ make bench-report RUN=full-1    # -> benchmark/results/full-1/report.md
 make bench-compare RUNS="full-1 full-2"   # side-by-side table
 ```
 
-Groq's free tier caps gpt-oss-120b at **200K tokens/day** (and 8K/minute). One full replay
-plus judging can exceed it. The replay and evaluation both resume where they stopped, and the
-evaluator reuses reference answers from earlier runs. Both stop as soon as the daily cap is
-reached. The replay paces itself at 5 requests/minute to stay under the per-minute limit. To
-split a replay over two days, keep cached answers alive between sessions with
-`FINOPS_CACHE__TTL_S=259200 make dev`, and cap the first session with
-`make bench-run RUN=full-2 ARGS="--limit 230"`.
+Groq's free tier caps gpt-oss-120b at **200K tokens/day** (and 8K/minute). With most traffic
+on premium, a full replay plus judging needs about 410K, so use a proportional sample that
+keeps the same mix of traffic:
+
+```bash
+uv run python -m benchmark.workload --subset 0.4    # 132 requests, ~160K tokens in total
+make bench-run RUN=full-2 ARGS="--workload benchmark/data/workload-40%.jsonl"
+```
+
+The replay paces itself at 5 requests/minute. The replay and the evaluation both resume where
+they stopped and stop as soon as the daily cap is reached, and the evaluator reuses reference
+answers from earlier runs.
 
 What the benchmark has already changed:
 

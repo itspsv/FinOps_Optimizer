@@ -181,6 +181,45 @@ def _qqp_pairs(
     return firsts, seconds
 
 
+def subset(items: list[WorkItem], fraction: float, seed: int = 42) -> list[WorkItem]:
+    """A smaller workload with the same mix, in the same order.
+
+    A prefix would be biased: repeats and paraphrases come after their originals, so an early
+    cut has too few of them. Instead, repeats are thinned on their own (popular questions stay
+    the most repeated) and everything else is sampled evenly within each task type, keeping
+    pairs together. Any original that a kept repeat needs is kept too.
+    """
+    rng = random.Random(seed)
+    roots = {i.id: i for i in items if i.kind != "repeat" and not i.original_id}
+    pairs = {i.original_id: i for i in items if i.original_id and i.kind != "repeat"}
+
+    repeats = [i for i in items if i.kind == "repeat"]
+    popularity = {
+        r: sum(i.original_id == r for i in repeats) for r in {i.original_id for i in repeats}
+    }
+    repeats.sort(key=lambda i: (-popularity[i.original_id], i.original_id))
+    kept_repeats = _evenly_spaced(repeats, fraction)
+    keep = {i.original_id for i in kept_repeats}
+
+    buckets: dict[tuple[str, str], list[str]] = {}
+    for root in roots.values():
+        buckets.setdefault((root.source, root.category), []).append(root.id)
+    for ids in buckets.values():
+        quota = max(1, round(len(ids) * fraction)) - sum(i in keep for i in ids)
+        rest = [i for i in ids if i not in keep]
+        rng.shuffle(rest)
+        if quota > 0:
+            keep.update(_evenly_spaced(rest, quota / len(rest)))
+
+    kept_ids = keep | {i.id for i in kept_repeats} | {pairs[r].id for r in keep if r in pairs}
+    return [i for i in items if i.id in kept_ids]
+
+
+def _evenly_spaced(values: list, fraction: float) -> list:
+    n = min(len(values), round(len(values) * fraction))
+    return [values[int(i * len(values) / n)] for i in range(n)]
+
+
 def save(items: list[WorkItem], path: Path = WORKLOAD_FILE) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(asdict(i), ensure_ascii=False) + "\n" for i in items))
@@ -195,10 +234,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build the benchmark workload.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scale", type=float, default=1.0, help="e.g. 0.2 for a quick run")
+    parser.add_argument(
+        "--subset",
+        type=float,
+        help="write a proportional sample of the existing workload to workload-<pct>.jsonl",
+    )
     args = parser.parse_args()
-    mix = Mix(**{k: max(1, round(v * args.scale)) for k, v in asdict(Mix()).items()})
-    items = build(mix, args.seed)
-    path = save(items)
+    if args.subset:
+        items = subset(load(), args.subset, args.seed)
+        path = save(items, WORKLOAD_FILE.with_name(f"workload-{args.subset:.0%}.jsonl"))
+    else:
+        mix = Mix(**{k: max(1, round(v * args.scale)) for k, v in asdict(Mix()).items()})
+        items = build(mix, args.seed)
+        path = save(items)
     kinds: dict[str, int] = {}
     for item in items:
         kinds[item.kind] = kinds.get(item.kind, 0) + 1
