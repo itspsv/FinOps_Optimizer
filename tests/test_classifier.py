@@ -122,17 +122,38 @@ def test_v2_keeps_grounded_and_transform_tasks_local(text: str):
         ("Is a PhD in chemistry worth pursuing?", "open_knowledge"),
         ("What exactly is the West Bank?", "open_knowledge"),
         ("Brainstorm ten names for a coffee shop.", "open_knowledge"),
-        (
-            "Janet's ducks lay 16 eggs per day. She eats three and sells the rest for $2 "
-            "each. How much does she make every day?",
-            "math_word_problem",
-        ),
+        # Mentions numbers and "average", but asks for a fact, not a calculation.
+        ("What was the average rainfall in 1990 and 2000 in Kerala?", "open_knowledge"),
     ],
 )
-def test_v2_sends_open_questions_and_word_problems_premium(text: str, signal: str):
+def test_v2_sends_open_questions_premium(text: str, signal: str):
     decision = classify(_ask(text), V2)
     assert decision.tier is Tier.PREMIUM
     assert signal in decision.signals
+
+
+WORD_PROBLEM = (
+    "Janet's ducks lay 16 eggs per day. She eats three and sells the rest for $2 "
+    "each. How much does she make every day?"
+)
+
+
+def test_math_word_problems_stay_local_by_default():
+    decision = classify(_ask(WORD_PROBLEM), V2)
+    assert decision.tier is Tier.LOCAL
+    assert decision.reason == "math_word_problem"
+
+
+def test_math_word_problems_can_be_sent_premium():
+    settings = RoutingSettings(local_policy="grounded", local_math_word_problems=False)
+    decision = classify(_ask(WORD_PROBLEM), settings)
+    assert decision.tier is Tier.PREMIUM
+    assert "math_word_problem" in decision.signals
+
+
+def test_explicit_math_stays_premium_even_with_word_problems_local():
+    assert classify(_ask("What is 37 * 49 + 12?"), V2).tier is Tier.PREMIUM
+    assert classify(_ask("Calculate how many days 3 weeks and 2 days is."), V2).tier is Tier.PREMIUM
 
 
 def test_short_trailer_after_blank_line_is_not_a_passage():

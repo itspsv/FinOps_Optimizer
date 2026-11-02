@@ -119,16 +119,18 @@ classify ─┬─ local ──▶ Ollama ──▶ answer ok? ── yes ──
 | Policy | Local gets | Premium gets |
 |---|---|---|
 | `permissive` (v1) | anything without complexity signals | code, math expressions, heavy reasoning |
-| `grounded` (v2, default) | tasks done from the given text: classify, summarize, extract, rewrite, questions with a supplied passage | also open knowledge questions and math word problems |
+| `grounded` (default) | tasks done from the given text: classify, summarize, extract, rewrite, questions with a supplied passage; math word problems | also open knowledge questions |
 
-Why v2: benchmark run `full-1` (v1) kept 89% of requests off premium and saved 60%, but an
-LLM judge rated only 54% of local answers acceptable. The 3B model handled extraction and
-summaries well and made up facts on open questions. It also sent 25 of 30 GSM8K word problems
-local, because they contain no math keywords. Set `routing.local_policy` to choose; a
-stronger local model (e.g. 8B on a 16 GB machine) makes `permissive` more viable.
+Why `grounded`: benchmark run `full-1` (`permissive`, llama3.2:3b) kept 89% of requests off
+premium and saved 60%, but an LLM judge rated only 54% of local answers acceptable. The model
+handled extraction and summaries well and made up facts on open questions.
 
-Local answers are cached like premium ones. Streamed requests that go local are answered in
-full, checked, then replayed as a stream.
+Why `qwen3:4b-instruct`: a head-to-head on the same questions (`benchmark/localeval.py`)
+scored it 90% on GSM8K math (llama3.2:3b: 76%) and 68% on knowledge questions (50%), at about
+25% lower speed. At 90%, math word problems stay local (`routing.local_math_word_problems`);
+at 68%, open knowledge questions do not. The word problem detector needs at least two numbers
+plus a quantity question: it catches 76% of GSM8K, and the rest go to premium, which is the
+safe direction. It matched about 0.1% of non-math prompts, some of which are real word problems.
 
 ## Cost ledger
 
@@ -186,8 +188,11 @@ make bench-compare RUNS="full-1 full-2"   # side-by-side table
 
 Groq's free tier caps gpt-oss-120b at **200K tokens/day** (and 8K/minute). One full replay
 plus judging can exceed it. The replay and evaluation both resume where they stopped, and the
-evaluator reuses reference answers from earlier runs. To split a replay over two days, keep
-cached answers alive between sessions with `FINOPS_CACHE__TTL_S=259200 make dev`.
+evaluator reuses reference answers from earlier runs. Both stop as soon as the daily cap is
+reached. The replay paces itself at 5 requests/minute to stay under the per-minute limit. To
+split a replay over two days, keep cached answers alive between sessions with
+`FINOPS_CACHE__TTL_S=259200 make dev`, and cap the first session with
+`make bench-run RUN=full-2 ARGS="--limit 230"`.
 
 What the benchmark has already changed:
 

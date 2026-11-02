@@ -11,8 +11,10 @@ Policies (`routing.local_policy`):
 - "permissive" (v1): anything without complexity signals goes local.
 - "grounded" (v2): local only for tasks it can do from the text it is given
   (classify, summarize, extract, rewrite, or questions with a supplied passage).
-  Open world-knowledge questions and math word problems go to premium. The v1
-  benchmark found a 3B model answers only ~50% of open questions acceptably.
+  Open world-knowledge questions go to premium: the local model scored 68% on
+  them in the head-to-head eval (50% for llama3.2:3b). Math word problems stay
+  local if `local_math_word_problems` is on: qwen3:4b-instruct got 90% of GSM8K
+  exactly right. Explicit math (expressions, "prove", "calculate") stays premium.
 """
 
 import re
@@ -139,13 +141,14 @@ _SIGNALS: list[tuple[str, int, re.Pattern[str]]] = [
     ),
 ]
 
-# v2: a math word problem has several numbers and asks about a quantity, often with
-# no math keywords at all ("Janet's ducks lay 16 eggs... how much does she make?").
+# v2: a math word problem has several numbers and asks for a quantity, often with no math
+# keywords ("Janet's ducks lay 16 eggs... how much does she make?"). It must ask the
+# question, not just mention "average" or "per": a false match sends a knowledge question
+# to the local model.
 _NUMBER = re.compile(r"\b\d+(?:[.,]\d+)?\b")
 _QUANTITY_QUESTION = _words(
-    "how many", "how much", "how long", "how far", "how old", "how often", "total",
-    "altogether", "in all", "left over", "remaining", "per", "each", "percent(?:age)?",
-    "average", "profit", "earns?", "costs?",
+    "how many", "how much", "how long", "how far", "how old", "how often",
+    "what is the total", "what percent(?:age)?",
 )  # fmt: skip
 _MIN_PASSAGE_CHARS = 150  # text after a blank line this long counts as supplied material
 
@@ -185,10 +188,12 @@ def classify(
         score += 1
         signals.append("long_conversation")
     if settings.local_policy == "grounded":
-        if len(_NUMBER.findall(text)) >= 2 and _QUANTITY_QUESTION.search(text):
-            score += 2
+        word_problem = is_math_word_problem(text)
+        if word_problem:
             signals.append("math_word_problem")
-        if "simple_task" not in signals and not has_supplied_material(text):
+            if not settings.local_math_word_problems:
+                score += 2
+        if not (word_problem or "simple_task" in signals or has_supplied_material(text)):
             score += 2
             signals.append("open_knowledge")
 
@@ -197,6 +202,10 @@ def classify(
     if tier is Tier.LOCAL and "simple_task" in signals:
         reason = "simple_task"
     return RouteDecision(tier, reason, score, signals, tokens)
+
+
+def is_math_word_problem(text: str) -> bool:
+    return len(_NUMBER.findall(text)) >= 2 and bool(_QUANTITY_QUESTION.search(text))
 
 
 def has_supplied_material(text: str) -> bool:

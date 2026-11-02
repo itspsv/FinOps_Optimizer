@@ -36,6 +36,7 @@ class ReplayResult:
     client_ms: float
     answer: str | None
     attempts: int
+    daily_cap: bool = False
 
 
 def run_dir(run_id: str) -> Path:
@@ -47,6 +48,10 @@ def load_results(path: Path) -> dict[str, ReplayResult]:
         return {}
     results = [ReplayResult(**json.loads(line)) for line in path.read_text().splitlines() if line]
     return {r.id: r for r in results}
+
+
+def is_daily_cap(response: httpx.Response) -> bool:
+    return response.status_code == 429 and "per day" in response.text
 
 
 class Pacer:
@@ -91,6 +96,8 @@ def send(
         client_ms = (time.perf_counter() - started) * 1000
         if response.status_code not in RETRY_STATUSES or attempt == max_attempts:
             break
+        if is_daily_cap(response):  # retrying can't help until the 24-hour window frees up
+            break
         retry_after = float(response.headers.get("retry-after") or 10 * attempt)
         print(f"    {item.id}: HTTP {response.status_code}, retrying in {retry_after:.0f}s")
         sleep(min(retry_after, 60))
@@ -113,6 +120,7 @@ def send(
         client_ms=round(client_ms, 1),
         answer=answer,
         attempts=attempt,
+        daily_cap=is_daily_cap(response),
     )
 
 
@@ -137,6 +145,12 @@ def replay(
             result = send(client, item, position, namespace, pacer)
             f.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
             f.flush()
+            if result.daily_cap:
+                print(
+                    f"  Stopping at {n}/{len(todo)}: Groq's daily token cap is reached. "
+                    "Re-run the same command later to resume."
+                )
+                break
             if n % 10 == 0 or n == len(todo):
                 elapsed = time.monotonic() - started
                 print(
@@ -151,7 +165,8 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M"))
     parser.add_argument("--workload", type=Path, default=WORKLOAD_FILE)
-    parser.add_argument("--max-rpm", type=float, default=25, help="pace requests for Groq")
+    # Groq's free tier allows 8,000 tokens/minute and premium answers average ~1,200 tokens.
+    parser.add_argument("--max-rpm", type=float, default=5, help="pace requests for Groq")
     parser.add_argument("--limit", type=int, help="send at most this many (for a smoke run)")
     args = parser.parse_args()
 

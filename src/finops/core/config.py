@@ -44,10 +44,12 @@ class CacheSettings(BaseModel):
 
 class RoutingSettings(BaseModel):
     enabled: bool = True
-    policy_version: str = "v2"
+    policy_version: str = "v3"
     # "grounded" (v2) keeps open knowledge questions off the local model;
     # "permissive" (v1) sends anything without complexity signals local.
     local_policy: Literal["permissive", "grounded"] = "grounded"
+    # Grounded policy only: keep math word problems on the local model.
+    local_math_word_problems: bool = True
     local_max_prompt_tokens: int = 1500
     local_max_completion_tokens: int = 512
     # Prepended for the local model only. Small models ramble, and at ~22 tokens/s on an

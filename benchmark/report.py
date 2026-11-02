@@ -25,6 +25,8 @@ def routing_accuracy(items: dict[str, WorkItem], results: dict[str, ReplayResult
         item = items[r.id]
         if r.status != 200 or r.route == "cache" or item.expected_tier is None:
             continue
+        if item.source == "gsm8k":  # local or premium depending on routing policy
+            continue
         decided = "local" if r.route == "local" or r.escalated else "premium"
         rows.append((item.expected_tier, decided))
     confusion = {
@@ -205,7 +207,7 @@ def render(s: dict) -> str:
         f"- Cut simulated LLM API spend by **{_pct(cost['savings_pct'])}** on a "
         f"{s['workload']['requests']}-request replay of public prompts by serving "
         f"{_pct(shares['cache'])} of traffic from a pgvector semantic cache and routing "
-        f"{_pct(shares['local'])} to a local 3B model.",
+        f"{_pct(shares['local'])} to a local model.",
     ]
     if s["speedup_cache_vs_premium"]:
         lines.append(

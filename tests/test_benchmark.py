@@ -137,7 +137,8 @@ def test_routing_accuracy_and_cache_behaviour():
     items = {
         "s1": WorkItem("s1", "p", "unique", "dolly", "classification", "local"),
         "s2": WorkItem("s2", "p", "unique", "dolly", "summarization", "local"),
-        "c1": WorkItem("c1", "p", "unique", "gsm8k", "math", "premium"),
+        "c1": WorkItem("c1", "p", "unique", "humaneval", "code", "premium"),
+        "g1": WorkItem("g1", "p", "unique", "gsm8k", "math", "premium"),
         "p1": WorkItem("p1", "p", "paraphrase", "qqp", "paraphrase", original_id="x"),
         "n1": WorkItem("n1", "p", "near_miss", "qqp", "near_miss", original_id="y"),
     }
@@ -145,6 +146,7 @@ def test_routing_accuracy_and_cache_behaviour():
         "s1": _result("s1", "local"),
         "s2": _result("s2", "premium", escalated="local_truncated"),  # decided local
         "c1": _result("c1", "local"),
+        "g1": _result("g1", "local"),  # either route is fine for GSM8K: not counted
         "p1": _result("p1", "cache", cache="hit_semantic"),
         "n1": _result("n1", "local"),
     }
@@ -255,3 +257,19 @@ async def test_daily_limit_stops_retries():
     with pytest.raises(evaluate.DailyLimitReached):
         await groq.ask([{"role": "user", "content": "hi"}], max_tokens=5)
     assert provider.calls == 1
+
+
+def test_replay_stops_at_groq_daily_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(replay, "RESULTS_DIR", tmp_path)
+    items = [
+        WorkItem(id=i, prompt="hi", kind="unique", source="dolly", category="open_qa")
+        for i in ("a", "b", "c")
+    ]
+    capped = httpx.Response(429, json={"error": {"message": "on tokens per day (TPD)"}})
+    with respx.mock(base_url="http://proxy.test") as mock:
+        route = mock.post("/v1/chat/completions").mock(return_value=capped)
+        with httpx.Client(base_url="http://proxy.test") as client:
+            path = replay.replay(items, "r1", client, Pacer(0))
+    assert route.call_count == 1  # no retries and no further requests
+    assert replay.load_results(path)["a"].daily_cap is True
+    assert replay.load_results(path)["a"].status == 429
