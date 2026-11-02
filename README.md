@@ -164,6 +164,29 @@ curl localhost:8000/finops/summary       # same numbers over HTTP
 | Savings | `sum(saved_usd) / sum(baseline_cost_usd)` |
 | Latency | p50 / p95 per route, from the ledger |
 
+## Results
+
+132-request replay of public prompts (a proportional 40% sample) on a MacBook Air M1, 8 GB.
+Savings use a measured baseline: every request's token count on the premium model, priced at
+GPT-6.1 Sol list price ($1.52 in total). Premium calls ran on Groq but are priced at that rate.
+
+| | v1: permissive, llama3.2:3b | Current: grounded, qwen3:4b-instruct |
+|---|---|---|
+| Local answers judged acceptable | 50% (11/22) | **90% (26/29)** |
+| Requests kept off premium | 87% | 35% |
+| API cost saved | 92% | **20%** |
+
+- The two quality scores cover different questions, since each policy sends different work
+  local. On identical questions, qwen3 scored 68% and llama3.2 50%. Quality is LLM-judged.
+- Current savings split: 12% from local answers, 8% from the cache.
+- Exact repeats: 16/16 served from cache in about 3 ms, against 3.6 s for premium (p50).
+- Semantic matching added little at the calibrated 0.96 threshold: 0/16 human rewordings hit,
+  and its one hit, on a look-alike question, was judged wrong.
+- Savings depend heavily on how repetitive the traffic is, and this workload's repeat rate is
+  a design choice, so they don't predict what a given company would save.
+
+Full report: `make bench-report RUN=<id>` (results are local and not committed).
+
 ## Benchmark
 
 A reproducible replay of public prompts measures everything above
@@ -182,6 +205,7 @@ make bench-calibrate            # pick the cache threshold on 2,000 labeled pair
 make dev                        # in another terminal
 make bench-run RUN=full-1       # replay (~30 min on an M1; resumable)
 make bench-eval RUN=full-1      # LLM judge + GSM8K exact match
+make bench-baseline RUN=full-1  # measure every request's all-premium token cost
 make bench-report RUN=full-1    # -> benchmark/results/full-1/report.md
 make bench-compare RUNS="full-1 full-2"   # side-by-side table
 ```

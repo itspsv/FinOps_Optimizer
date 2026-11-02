@@ -232,6 +232,9 @@ async def evaluate(
                         question=item.prompt[:MAX_CHARS], candidate=candidate
                     )
                 verdict, reason = await groq.judge(prompt)
+            except DailyLimitReached as exc:
+                print(f"Stopping: Groq daily token cap reached. {exc}", flush=True)
+                break
             except ProviderError as exc:
                 verdict, reason = "error", f"Groq error {exc.status_code}"
             judgement = Judgement(item_id, check, verdict, reason, reference)

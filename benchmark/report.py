@@ -58,6 +58,7 @@ def build_summary(
     results: dict[str, ReplayResult],
     evaluation: dict | None,
     calibration: dict | None,
+    measured_baseline: dict | None = None,
 ) -> dict[str, Any]:
     routes = ledger["routes"]
     cache_p50, premium_p50 = routes["cache"]["p50_ms"], routes["premium"]["p50_ms"]
@@ -74,6 +75,7 @@ def build_summary(
         "routing": routing_accuracy(items, results),
         "cache": cache_behaviour(items, results),
         "evaluation": evaluation,
+        "measured_baseline": measured_baseline,
         "calibration": calibration
         and {
             "pairs": calibration["pairs"],
@@ -96,6 +98,34 @@ def render(s: dict) -> str:
     pricing, ev, cal = led["pricing"], s["evaluation"] or {}, s["calibration"]
     shares, cache = s["shares"], s["cache"]
     lq, sp = ev.get("local_quality") or {}, ev.get("semantic_hit_precision") or {}
+    mb = s.get("measured_baseline")
+    own = mb["runs"].get(s["run_id"]) if mb and mb["complete"] else None
+    measured_row = (
+        [
+            f"| **API cost saved vs. measured all-premium** | **{_pct(own['savings_pct'])}** "
+            f"(${own['saved_usd']:.4f} of ${mb['baseline_usd']:.4f}) |"
+        ]
+        if own
+        else []
+    )
+    measured_cost = []
+    if own:
+        measured_cost = [
+            "",
+            f"**Measured baseline:** all {mb['requests']} requests on `{mb['baseline_model']}` at "
+            f"list price, using token counts measured on the premium model: "
+            f"${mb['baseline_usd']:.4f}. Unlike the ledger baseline above, this is the same for "
+            "any routing policy, so these runs can be compared:",
+            "",
+            "| Run | Premium requests | Cost | Saved |",
+            "|---|---|---|---|",
+            *(
+                f"| {name} | {r['premium_requests']} | ${r['cost_usd']:.4f} | "
+                f"{_pct(r['savings_pct'])} |"
+                for name, r in mb["runs"].items()
+            ),
+        ]
+    headline_savings = own["savings_pct"] if own else cost["savings_pct"]
 
     lines = [
         f"# Benchmark report: {s['run_id']}",
@@ -109,8 +139,9 @@ def render(s: dict) -> str:
         "|---|---|",
         f"| Requests kept off the premium API | **{_pct(led['deflection_rate'])}** |",
         f"| Tokens kept off the premium API | {_pct(led['token_deflection_rate'])} |",
-        f"| API cost saved vs. all-premium | **{_pct(cost['savings_pct'])}** "
+        f"| API cost saved vs. ledger baseline (served tokens) | **{_pct(cost['savings_pct'])}** "
         f"(${cost['saved_usd']:.4f} of ${cost['baseline_usd']:.4f}) |",
+        *measured_row,
         f"| Cache p50 latency vs. premium p50 | **{_ms(routes['cache']['p50_ms'])}** vs. "
         f"{_ms(routes['premium']['p50_ms'])}"
         + (
@@ -148,6 +179,7 @@ def render(s: dict) -> str:
         f"and cache $0: ${cost['actual_usd']:.4f}",
         f"- **Actually billed by Groq** during the run: ${cost['billed_usd']:.4f}",
         f"- Pricing version `{pricing['version']}`",
+        *measured_cost,
         "",
         "## Cache behaviour",
         "",
@@ -175,8 +207,9 @@ def render(s: dict) -> str:
         "## Routing",
         "",
         f"Router decisions matched the expected tier for **{_pct(rt['accuracy'])}** of "
-        f"{rt['n']} labeled requests (simple Dolly categories expected local; GSM8K and "
-        "HumanEval expected premium).",
+        f"{rt['n']} labeled requests (simple Dolly categories expected local; HumanEval expected "
+        "premium; GSM8K not counted). These labels predate the grounded policy, which sends "
+        "open_qa to premium by design.",
         "",
         f"- Expected local, sent premium: {rt['expected_local_got_premium']} "
         "(route reasons are in responses.jsonl)",
@@ -192,8 +225,10 @@ def render(s: dict) -> str:
         "",
         "- Premium calls were served by Groq but priced at the baseline model's list price, to "
         "model a company paying commercial API rates.",
-        "- Token counts are those of the answer actually served; local models can be wordier "
-        "than premium ones, which slightly overstates baseline cost for local answers.",
+        "- Baseline cost uses the tokens of the answer actually served. Local answers are told "
+        "to be brief, so they are shorter than a premium answer to the same prompt. This "
+        "understates baseline and savings, and savings percentages from runs with different "
+        "routing are not directly comparable.",
         "- The workload's repeat and paraphrase rates are design choices; savings scale with how "
         "repetitive real traffic is.",
         f"- Quality is judged by `{ev.get('judge_model', 'n/a')}`, a sample-based LLM judge, not "
@@ -204,9 +239,9 @@ def render(s: dict) -> str:
         "",
         "## Resume-ready lines",
         "",
-        f"- Cut simulated LLM API spend by **{_pct(cost['savings_pct'])}** on a "
+        f"- Cut simulated LLM API spend by **{_pct(headline_savings)}** on a "
         f"{s['workload']['requests']}-request replay of public prompts by serving "
-        f"{_pct(shares['cache'])} of traffic from a pgvector semantic cache and routing "
+        f"{_pct(shares['cache'])} of traffic from an exact and semantic cache and routing "
         f"{_pct(shares['local'])} to a local model.",
     ]
     if s["speedup_cache_vs_premium"]:
@@ -261,6 +296,7 @@ def main() -> None:
         results,
         _read_json(out / "eval_summary.json"),
         _read_json(CALIBRATION_FILE),
+        _read_json(out / "baseline.json"),
     )
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     (out / "report.md").write_text(render(summary))

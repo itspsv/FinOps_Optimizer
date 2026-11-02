@@ -286,3 +286,68 @@ def test_subset_keeps_groups_mix_and_order(fake_datasets):
     assert {i.source for i in half} == {i.source for i in items}
     assert sum(i.kind == "repeat" for i in half) == 3  # 6 repeats in the full mix: stays 50%
     assert [i.id for i in workload.subset(items, 0.5)] == [i.id for i in half]  # reproducible
+
+
+def _baseline_fixture():
+    from finops.ledger.pricing import ModelPrice, PriceTable
+
+    prices = PriceTable(
+        version="t",
+        baseline_model="b",
+        premium_priced_as="b",
+        models={"b": ModelPrice(input_per_1m=2.0, output_per_1m=10.0)},
+    )
+    items = {
+        "a": WorkItem("a", "premium prompt", "unique", "dolly", "open_qa"),
+        "b": WorkItem("b", "local prompt", "unique", "dolly", "summarization"),
+        "c": WorkItem("c", "local prompt", "repeat", "dolly", "summarization", original_id="b"),
+    }
+    results = {i: _result(i, "x") for i in items}
+    for key, result in results.items():
+        result.request_id = f"r-{key}"
+    ledger = {
+        "r-a": {"route": "premium", "tokens": (100, 1000), "cost_usd": 0.0102},
+        "r-b": {"route": "local", "tokens": (50, 10), "cost_usd": 0.0},
+        "r-c": {"route": "cache", "tokens": (50, 10), "cost_usd": 0.0},
+    }
+    return prices, items, results, ledger
+
+
+def test_baseline_measures_each_non_premium_prompt_once():
+    from benchmark import baseline
+
+    _, items, results, ledger = _baseline_fixture()
+    known = baseline.premium_tokens_by_prompt(results, ledger, items)
+    assert known == {"premium prompt": (100, 1000)}
+    assert baseline.prompts_to_measure(items, items, known) == ["local prompt"]
+
+
+def test_baseline_is_the_same_for_every_run():
+    from benchmark import baseline
+
+    prices, items, results, ledger = _baseline_fixture()
+    tokens = {"premium prompt": (100, 1000), "local prompt": (50, 500)}
+    # A second policy sent everything local: same requests, no premium cost.
+    other = {k: {**v, "route": "local", "cost_usd": 0.0} for k, v in ledger.items()}
+
+    out = baseline.compute(
+        list(items), items, tokens, prices, {"p1": (results, ledger), "p2": (results, other)}
+    )
+
+    per_request_local = (50 * 2 + 500 * 10) / 1e6
+    assert out["complete"] is True
+    assert out["baseline_usd"] == pytest.approx(0.0102 + 2 * per_request_local)
+    assert out["runs"]["p1"]["savings_pct"] == pytest.approx(1 - 0.0102 / out["baseline_usd"])
+    assert out["runs"]["p2"]["savings_pct"] == 1.0
+    assert out["runs"]["p1"]["premium_requests"] == 1
+
+
+def test_incomplete_baseline_is_flagged_and_not_reported():
+    from benchmark import baseline
+
+    prices, items, results, ledger = _baseline_fixture()
+    out = baseline.compute(
+        list(items), items, {"premium prompt": (100, 1000)}, prices, {"p1": (results, ledger)}
+    )
+    assert out["complete"] is False
+    assert out["unmeasured_requests"] == 2

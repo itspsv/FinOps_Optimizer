@@ -1,5 +1,5 @@
 .PHONY: install db-init dev report test lint format \
-	bench-data bench-calibrate bench-run bench-eval bench-report bench-compare
+	bench-data bench-calibrate bench-run bench-eval bench-baseline bench-report bench-compare
 
 install:
 	uv sync
@@ -27,6 +27,9 @@ bench-run:         ## replay the workload through `make dev` (RUN=<id> to resume
 
 bench-eval:        ## judge answer quality for RUN=<id>
 	uv run python -m benchmark.evaluate --run-id $(RUN) $(ARGS)
+
+bench-baseline:    ## measure the all-premium cost of RUN=<id>, e.g. ARGS="--compare-run full-1"
+	uv run python -m benchmark.baseline --run-id $(RUN) $(ARGS)
 
 bench-report:      ## write benchmark/results/<RUN>/report.md
 	uv run python -m benchmark.report --run-id $(RUN)
