@@ -1,0 +1,85 @@
+{
+  "requests": 132,
+  "baseline_usd": 1.52478,
+  "baseline_model": "gpt-6.1-sol",
+  "routes": {
+    "cache": {
+      "requests": 17,
+      "cost_usd": 0.12491800000000002,
+      "p50_seconds": 0.0032
+    },
+    "local": {
+      "requests": 29,
+      "cost_usd": 0.18390600000000004,
+      "p50_seconds": 8.260200000000001
+    },
+    "premium": {
+      "requests": 86,
+      "cost_usd": 1.2159559999999998,
+      "p50_seconds": 3.6231
+    }
+  },
+  "current": {
+    "savings": 0.20253675940135624,
+    "cost_usd": 1.215956,
+    "kept_off_paid": 0.3484848484848485,
+    "quality": {
+      "passed": 26,
+      "n": 29,
+      "rate": 0.896551724137931,
+      "margin": 0.11084251616249448
+    }
+  },
+  "first": {
+    "savings": 0.9212397854116658,
+    "cost_usd": 0.120092,
+    "kept_off_paid": 0.8712121212121212,
+    "route_requests": {
+      "cache": 17,
+      "local": 98,
+      "premium": 17
+    },
+    "quality": {
+      "passed": 11,
+      "n": 22,
+      "rate": 0.5,
+      "margin": 0.20893670202849823
+    }
+  },
+  "cache": {
+    "repeats": {
+      "hits": 16,
+      "n": 16
+    },
+    "paraphrases": {
+      "hits": 0,
+      "n": 16
+    },
+    "lookalikes": {
+      "hits": 1,
+      "n": 8
+    }
+  },
+  "free_models": {
+    "math": {
+      "old": {
+        "passed": 22,
+        "n": 29
+      },
+      "new": {
+        "passed": 27,
+        "n": 30
+      }
+    },
+    "knowledge": {
+      "old": {
+        "passed": 17,
+        "n": 34
+      },
+      "new": {
+        "passed": 23,
+        "n": 34
+      }
+    }
+  }
+}

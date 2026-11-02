@@ -1,4 +1,4 @@
-.PHONY: install db-init dev report test lint format \
+.PHONY: install db-init dev dashboard report test lint format \
 	bench-data bench-calibrate bench-run bench-eval bench-baseline bench-report bench-compare
 
 install:
@@ -9,6 +9,9 @@ db-init:
 
 dev:
 	uv run uvicorn finops.api.main:app --reload --port 8000
+
+dashboard:
+	uv run streamlit run dashboard/app.py
 
 report:
 	uv run python scripts/report.py $(ARGS)

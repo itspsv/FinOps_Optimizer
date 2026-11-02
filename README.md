@@ -7,10 +7,10 @@ A local-first proxy that sits between applications and paid LLM APIs and cuts co
 
 Every decision is recorded in a cost ledger and shown in a Streamlit dashboard.
 
-> **Status:** Step 5 of 6. Proxy, semantic cache, LangGraph router, priced ledger, and a
-> reproducible benchmark on public datasets. Next: Streamlit dashboard.
+> **Status:** complete: proxy, semantic cache, LangGraph router, priced ledger, reproducible
+> benchmark and a results dashboard. See [Results](#results).
 
-## Architecture (target)
+## Architecture
 
 ```
 App ──▶ FastAPI proxy ──▶ 1. Cache hit?  ──yes──▶ cached answer
@@ -186,6 +186,21 @@ GPT-6.1 Sol list price ($1.52 in total). Premium calls ran on Groq but are price
   a design choice, so they don't predict what a given company would save.
 
 Full report: `make bench-report RUN=<id>` (results are local and not committed).
+
+## Dashboard
+
+A one-page summary of these results for non-technical readers:
+
+```bash
+make dashboard    # opens on http://localhost:8501
+```
+
+It only reads `dashboard/data/results.json`, so it needs no database, Ollama or Groq. After a
+new benchmark run, refresh that file with:
+
+```bash
+uv run python -m scripts.export_dashboard_data --run-id <id> --first-run full-1
+```
 
 ## Benchmark
 
